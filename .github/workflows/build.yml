@@ -49,16 +49,70 @@ jobs:
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer（AIVerse-Setup.exe）
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe" }
+          & $iscc "installer\aiverse.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败" }
+          Get-ChildItem installer\Output
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AIVerse-windows-x64
-          path: dist/AIVerse.exe
+          path: |
+            dist/AIVerse.exe
+            installer/Output/AIVerse-Setup-*.exe
           if-no-files-found: error
 
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/AIVerse.exe
+          files: |
+            dist/AIVerse.exe
+            installer/Output/AIVerse-Setup-*.exe
           generate_release_notes: true
+          body: |
+            ## 先看这里：为什么安装包只有 10 MB？
+
+            打开安装包你会看到它很小。这不是缺东西，而是分工：
+
+            | 组成 | 大小 | 装在哪 |
+            |---|---|---|
+            | **编排大脑**（本项目） | **约 10 MB** | 安装包里，双击即用 |
+            | 剧本/角色/场景/分镜 Agent、审核门、抽卡、局部重生成、时间线、字幕、剪辑导出 | 同上 | 同上 |
+            | **一键部署器**（自动装下面这一堆） | 同上 | 同上 |
+            | Python 隔离环境 + PyTorch + CUDA | 约 2.5 GB | 首次部署时自动装 |
+            | ComfyUI 执行引擎 | 约 2.4 GB | 首次部署时自动装 |
+            | **MiniMax H3 权重（33B 参数，量化版）** | **26.4 GB** | 首次部署时自动下 |
+
+            MiniMax H3 是 33B 参数的全模态视频模型，量化权重 26.4 GB（BF16 版 50+ GB）。
+            没有任何办法把它压进 10 MB 的 exe —— 这不是取舍问题，是物理问题。
+            ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是「小安装包 + 首次运行下载」。
+
+            所以我们把「让用户自己去装」变成「点一下全自动装」，并额外提供**离线包**：
+
+            | 你的情况 | 该怎么做 |
+            |---|---|
+            | 有网、有 N 卡 | 安装 → 点「⚡ 一键部署」→ 等 20~60 分钟 → 开始出片。全程只点一次 |
+            | 没网 / 网慢 / 要给多台机器装 | 任意一台部署好 → 「📦 导出离线包」→ 拷 U 盘 → 其他机器「📥 导入离线包」，**零下载** |
+            | 完全不想碰本地算力 | 装好后不部署，直接在「设置」里接云端 Provider（OpenAI 兼容 / 官方 H3 API） |
+
+            **硬件门槛**：8 GB 显存能跑（慢但不崩）、12 GB 舒适、24 GB 随便跑；原生输出 768p。
+            中文口播偏弱，建议用内置 TTS 走后期配音。
+
+            ---
+
+            首次启动会自动生成示例项目「示例 · 药铺里的秘密」并跑满全部 8 个阶段（约 2 秒），
+            点开就能看到一条完整产线长什么样。
+
+            两个附件：
+            - `AIVerse.exe` —— 绿色版，双击即用，数据随 exe 走
+            - `AIVerse-Setup-1.0.0.exe` —— 安装版，开始菜单/桌面快捷方式，卸载不删项目与模型
