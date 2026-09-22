@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,12 +27,29 @@ GH = "gh"
 
 
 def run(args: list[str], check: bool = True, **kw) -> subprocess.CompletedProcess:
-    p = subprocess.run(args, cwd=str(ROOT), text=True,
+    # GIT_TERMINAL_PROMPT=0：宁可快速失败，也不要卡在等待输入上（会挂住整个脚本）
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    p = subprocess.run(args, cwd=str(ROOT), text=True, env=env,
                        capture_output=True, **kw)
     if check and p.returncode != 0:
         print(f"  ✗ {' '.join(args)}\n    {p.stderr.strip()[:400]}")
         raise SystemExit(1)
     return p
+
+
+def fix_credentials() -> None:
+    """让 gh 接管 github.com 的 git 凭据。
+
+    本机 PortableGit 的系统级 gitconfig 里设了 `credential.helper = helper-selector`，
+    它优先级高于 gh 注册的 helper，会导致 `git push` 卡在等待输入上（实测挂死 4 分钟）。
+    这里把仓库级 helper 列表重置，只留 gh 自己。
+    """
+    if shutil.which(GH) or Path(GH).exists():
+        run([GH, "auth", "setup-git"], check=False)
+    run(["git", "config", "--local", "credential.helper", ""], check=False)
+    run(["git", "config", "--local", "credential.https://github.com.helper",
+         f"!{GH} auth git-credential"], check=False)
+    print("  ✓ git 凭据已交给 gh 管理")
 
 
 def gh_json(args: list[str]) -> dict:
@@ -56,11 +75,12 @@ def main() -> int:
     login = me.get("login")
     print(f"  ✓ 已登录：{login}")
 
-    print("\n[2/4] 设置 git 身份")
+    print("\n[2/4] 设置 git 身份与凭据")
     email = me.get("email") or f"{login}@users.noreply.github.com"
     run(["git", "config", "user.name", login])
     run(["git", "config", "user.email", email])
     print(f"  ✓ {login} <{email}>")
+    fix_credentials()
 
     print("\n[3/4] 提交改动")
     run(["git", "add", "-A"])

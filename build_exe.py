@@ -14,6 +14,14 @@ import sys
 import time
 from pathlib import Path
 
+# Windows CI runner 的控制台默认是 cp1252，直接 print 中文会 UnicodeEncodeError。
+# 这里强制把标准输出切成 UTF-8，避免构建脚本本身把自己搞挂。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 EXE = DIST / "AIVerse.exe"
