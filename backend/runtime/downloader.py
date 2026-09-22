@@ -2,7 +2,8 @@
 
 特性：
   * HTTP Range 断点续传（.part 临时文件 + 校验通过后才改名）
-  * 多镜像自动回退
+  * 多镜像自动回退 —— 连不上要换，**连得上但被限速到十几 KB/s 也要换**
+  * 启动前按实测速度给候选源排序
   * 实时进度回调（已下载 / 总大小 / 速度 / 剩余时间）
   * 支持取消
   * 模型仓库下载：优先调用 modelscope / huggingface_hub CLI，缺失时回退 HTTP 直链
@@ -16,6 +17,13 @@
   1. `.part.meta` 记下「来源 URL + 远端总大小」，续传前比对，对不上就丢弃重下
   2. 下完先比对 `have == total`，不足就**不改名**，保留 .part 供下次续传
   3. `unzip()` 对坏压缩包抛明确错误；上层 `installer` 会清掉缓存重下一次
+
+**为什么要有「慢也算失败」（别删）**：2026-09 实测，ghproxy.net / gh-proxy.com /
+github.com 三个源都连得上、也都能返回 206，但全被限速到 12~15 KB/s。
+uv 才 17 MB，跑了两分半只下到 2 MB，进度条停在 11% 再也不动 ——
+用户看到的现象是「点了『开始一键部署』没反应」，而不是报错。
+所以只判断「请求是否成功」是不够的：必须拿**实测吞吐**当判据，
+不达标的源直接放弃换下一个，否则 43 GB 的权重能下到天荒地老。
 """
 from __future__ import annotations
 
@@ -35,6 +43,16 @@ Progress = Callable[[dict], None]
 
 CHUNK = 1024 * 256
 
+# ---------------------------------------------------------------- 网速判据
+# 单位都是字节/秒。96 KB/s 是个刻意压低的值：正常家用宽带下任何一个
+# 真实可用的源都能轻松超过它，只有「被限速 / 被 QoS / 源站半死」才会掉到下面。
+MIN_SPEED_BPS = 96 * 1024
+SPEED_WINDOW = 12.0      # 观察窗口：窗口内平均速度不达标就放弃这个源
+READ_TIMEOUT = 15.0      # 单次 socket 读超时（彻底不吐数据时的兜底）
+PROBE_BYTES = 768 * 1024
+PROBE_BUDGET = 6.0       # 单个源测速最长花多久
+PROBE_TTL = 600.0        # 同一域名的测速结果缓存 10 分钟
+
 
 class Cancelled(Exception):
     pass
@@ -48,6 +66,10 @@ class CorruptArchive(RuntimeError):
     """压缩包损坏（常见于续传到了垃圾数据），需要清缓存重下。"""
 
 
+class SlowMirror(RuntimeError):
+    """连得上、不报错，但吞吐低到不可用 —— 当成失败处理，换下一个源。"""
+
+
 class Downloader:
     def __init__(self, progress: Progress | None = None,
                  is_cancelled: Callable[[], bool] | None = None):
@@ -55,24 +77,73 @@ class Downloader:
         self.is_cancelled = is_cancelled or (lambda: False)
 
     # ------------------------------------------------------------ HTTP
+    def rank_mirrors(self, urls: list[str]) -> list[str]:
+        """按**实测速度**给候选源排序，快在前；完全连不上的丢掉。
+
+        为什么不是「按配置顺序试」：配置里排第一的往往是国内加速镜像，
+        它可能正在被限速。挨个试到第三个源要浪费几十秒到几分钟，
+        而先花几秒测一遍，之后每个组件都直接命中快的那个。
+        测速结果按域名缓存 10 分钟，所以整场部署其实只测了一轮。
+        """
+        if len(urls) < 2:
+            return list(urls)
+
+        scored: list[tuple[float, int, str]] = []
+        for i, url in enumerate(urls):
+            host = _host_of(url)
+            cached = _host_speed_get(host)
+            if cached is None:
+                try:
+                    speed = probe_speed(url, self.is_cancelled)
+                except Cancelled:
+                    raise
+                _host_speed_put(host, speed)
+                self.progress({"phase": "probe",
+                               "message": f"测速 {host}："
+                                          f"{_speed_text(speed)}"})
+            else:
+                speed = cached
+            # 连不上的源（0）沉到最后；同速时保持原顺序，结果可复现
+            scored.append((0.0 if speed <= 0 else speed, -i, url))
+
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        ranked = [u for _s, _i, u in scored]
+        if ranked != list(urls):
+            self.progress({"phase": "probe",
+                           "message": "已按实测速度排序镜像："
+                                      + " > ".join(_host_of(u) for u in ranked)})
+        return ranked
+
     def fetch(self, urls: list[str], dest: Path, label: str = "",
               expected_gb: float = 0.0) -> Path:
         """依次尝试多个镜像地址，支持断点续传。"""
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_suffix(dest.suffix + ".part")
-        last_err: Exception | None = None
+        errors: list[str] = []
 
-        for url in urls:
+        for url in self.rank_mirrors(urls):
             try:
                 self._fetch_one(url, part, dest, label or dest.name, expected_gb)
                 return dest
             except Cancelled:
                 raise
             except Exception as e:
-                last_err = e
-                self.progress({"phase": "retry", "message": f"镜像失败，切换下一个：{e}"})
+                errors.append(f"{_host_of(url)}：{e}")
+                self.progress({"phase": "retry",
+                               "message": f"镜像失败，切换下一个：{e}"})
                 continue
-        raise RuntimeError(f"全部镜像下载失败：{last_err}")
+
+        # 全都失败时把每个源各自的死因摊开 —— 只说「全部镜像下载失败」
+        # 会让人以为是自己网络断了，而真实原因往往是「三个源都被限速」。
+        if errors and all("太慢" in e for e in errors):
+            raise RuntimeError(
+                "所有镜像都太慢（低于 %.0f KB/s），已逐个放弃：\n  "
+                % (MIN_SPEED_BPS / 1024) + "\n  ".join(errors)
+                + "\n\n这通常不是你的网络断了，而是这些加速源当前被限速。"
+                  "可以试试：① 换个镜像源（设置里切「海外直连」）；"
+                  "② 用离线包导入（在别的机器上部署好，拷 U 盘过来）。"
+            )
+        raise RuntimeError("全部镜像下载失败：\n  " + "\n  ".join(errors))
 
     def _fetch_one(self, url: str, part: Path, dest: Path, label: str,
                    expected_gb: float) -> None:
@@ -95,7 +166,7 @@ class Downloader:
             req.add_header("Range", f"bytes={have}-")
 
         try:
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(req, timeout=READ_TIMEOUT)
         except urllib.error.HTTPError as e:
             if e.code == 416:                      # 已下完
                 total = _read_meta(meta_path).get("total") or 0
@@ -138,16 +209,32 @@ class Downloader:
         mode = "ab" if have else "wb"
         t0 = time.time()
         base_have = have
+        # 观察窗口的起点：每过一个 SPEED_WINDOW 就结算一次平均速度。
+        # 不能用「从 t0 到现在的总平均」——那样前面跑得快、后面被限速时
+        # 总平均还很好看，卡死就检测不出来。
+        win_t0 = time.time()
+        win_have = have
         with open(part, mode) as f, resp:
             while True:
                 if self.is_cancelled():
                     raise Cancelled()
                 chunk = resp.read(CHUNK)
+                now = time.time()
                 if not chunk:
                     break
                 f.write(chunk)
                 have += len(chunk)
-                dt = max(0.001, time.time() - t0)
+
+                win_dt = now - win_t0
+                if win_dt >= SPEED_WINDOW:
+                    win_speed = (have - win_have) / win_dt
+                    if win_speed < MIN_SPEED_BPS:
+                        raise SlowMirror(
+                            f"{_host_of(url)} 太慢：{_speed_text(win_speed)}"
+                            f"（低于 {MIN_SPEED_BPS / 1024:.0f} KB/s），放弃换源")
+                    win_t0, win_have = now, have
+
+                dt = max(0.001, now - t0)
                 speed = (have - base_have) / dt
                 self.progress({
                     "phase": "download",
@@ -314,6 +401,70 @@ class Downloader:
                        "message": f"{repo} 下载完成（{human_size(got)}），"
                                   f"耗时 {int(time.time() - t0)}s"})
         return target
+
+
+# ---------------------------------------------------------------- 测速
+def _host_of(url: str) -> str:
+    """取域名 —— 限速是**按域名**发生的，所以测速结果也按域名缓存。"""
+    parts = url.split("/")
+    return parts[2] if len(parts) > 2 and parts[2] else url
+
+
+def _speed_text(bps: float) -> str:
+    if bps <= 0:
+        return "连不上"
+    if bps >= 1024 * 1024:
+        return f"{bps / 1024 / 1024:.1f} MB/s"
+    return f"{bps / 1024:.0f} KB/s"
+
+
+def probe_speed(url: str, is_cancelled: Callable[[], bool] | None = None,
+                nbytes: int = PROBE_BYTES, budget: float = PROBE_BUDGET) -> float:
+    """实测一个地址的下载速度（字节/秒）。连不上或超时返回 0。
+
+    只读前 768 KB 就下结论：真正的瓶颈（限速 / 半死源）在头几百 KB 就能看出来，
+    而为了测速去下几十 MB 反而是在浪费用户的时间。
+    """
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "AIVerse/1.0",
+        "Range": f"bytes=0-{nbytes - 1}",
+    })
+    t0 = time.time()
+    got = 0
+    try:
+        with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as r:
+            while got < nbytes:
+                if is_cancelled and is_cancelled():
+                    raise Cancelled()
+                if time.time() - t0 > budget:
+                    break
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                got += len(chunk)
+    except Cancelled:
+        raise
+    except Exception:
+        return 0.0
+    dt = time.time() - t0
+    return got / dt if dt > 0 else 0.0
+
+
+_HOST_SPEED: dict[str, tuple[float, float]] = {}
+_HOST_LOCK = threading.Lock()
+
+
+def _host_speed_get(host: str) -> float | None:
+    with _HOST_LOCK:
+        hit = _HOST_SPEED.get(host)
+    if hit and time.time() - hit[0] < PROBE_TTL:
+        return hit[1]
+    return None
+
+
+def _host_speed_put(host: str, speed: float) -> None:
+    with _HOST_LOCK:
+        _HOST_SPEED[host] = (time.time(), speed)
 
 
 def _write_meta(meta_path: Path, url: str, total: int) -> None:

@@ -6,17 +6,34 @@
 或直接：
     python build_exe.py
 """
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
 
 # 后端是动态导入的包，显式收集全部子模块，避免漏打
 hidden = collect_submodules("backend")
+
+# FFmpeg 随程序自带：它是导出成片的唯一硬依赖，不该等 39 GB 的 H3 权重下载完。
+# 抓不到（离线构建、或手动 --no-ffmpeg）时照样能打包，只是导出前得先装 FFmpeg。
+# 运行时查找顺序见 backend/media/ffmpeg.py 的 _bin_dirs()。
+_datas = [("frontend", "frontend")]
+_ffmpeg_dir = "assets/ffmpeg"
+if os.path.isdir(_ffmpeg_dir) and os.path.isfile(os.path.join(_ffmpeg_dir, "bin", "ffmpeg.exe")):
+    print(f"[spec] 内置 FFmpeg：{_ffmpeg_dir}")
+    # 只带 ffmpeg.exe / ffprobe.exe —— ffplay 是播放器，程序用不到，白占 80 MB
+    _bin = os.path.join(_ffmpeg_dir, "bin")
+    for _n in sorted(os.listdir(_bin)):
+        if _n.startswith("ffmpeg.") or _n.startswith("ffprobe."):
+            _datas.append((os.path.join(_bin, _n), "ffmpeg/bin"))
+else:
+    print("[spec] 未找到 assets/ffmpeg/bin/ffmpeg.exe —— 打包出的 exe 不自带 FFmpeg")
 
 a = Analysis(
     ["run.py"],
     pathex=[],
     binaries=[],
     # 前端静态资源必须打进包里
-    datas=[("frontend", "frontend")],
+    datas=_datas,
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

@@ -58,3 +58,7 @@ build_*/
 dist/
 dist_*/
 installer/Output/
+
+# 内置 FFmpeg：tools/fetch_ffmpeg.py 在打包前抓下来的二进制（约 160 MB），
+# 每次构建现抓，不入库。
+assets/ffmpeg/

@@ -41,20 +41,31 @@ def human(n: int) -> str:
 
 
 def main() -> int:
-    print("\n[1/4] 生成应用图标")
+    skip_ffmpeg = "--no-ffmpeg" in sys.argv
+
+    print("\n[1/5] 生成应用图标")
     run([sys.executable, str(ROOT / "tools" / "make_icon.py")])
 
-    print("\n[2/4] 清理旧构建")
+    print("\n[2/5] 取 FFmpeg（随程序自带，导出成片开箱可用）")
+    if skip_ffmpeg:
+        print("  – 已用 --no-ffmpeg 跳过；这样打出来的包导出时会提示先装 FFmpeg")
+    else:
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "fetch_ffmpeg.py")],
+                           cwd=ROOT)
+        if r.returncode != 0:
+            print("  ! FFmpeg 没抓到（不影响打包，但用户导出前得先装 FFmpeg）")
+
+    print("\n[3/5] 清理旧构建")
     for d in (ROOT / "build", DIST):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
 
-    print("\n[3/4] PyInstaller 打包（单文件模式，首次约需 1-3 分钟）")
+    print("\n[4/5] PyInstaller 打包（单文件模式，首次约需 1-3 分钟）")
     t0 = time.time()
     run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", "aiverse.spec"])
     dt = time.time() - t0
 
-    print("\n[4/4] 校验产物")
+    print("\n[5/5] 校验产物")
     if not EXE.exists():
         print("  ✗ 未生成 dist/AIVerse.exe，请检查上方日志")
         return 1
@@ -64,9 +75,10 @@ def main() -> int:
     print("\n  双击 dist/AIVerse.exe 即可运行，浏览器会自动打开控制台。")
     print("  绿色版：数据与 30GB 推理运行时放在 exe 同级，可随 U 盘带走。")
     print("  安装版（iscc installer\\aiverse.iss）：统一放到 %LOCALAPPDATA%\\AIVerse，重装不丢模型。")
-    print("\n  关于体积：本 exe 是「编排大脑 + 一键部署器」，约 10 MB。")
-    print("  真正的算力是 MiniMax H3（33B 参数 / 精简版权重 39 GB 起），物理上无法打进 exe，")
-    print("  由首次运行时的「⚡ 环境部署」自动安装，或走「离线包导入」零下载复制。")
+    print("\n  关于体积：")
+    print("  · 内置 FFmpeg（约 80 MB，压缩后实际增量小得多）—— 导出成片开箱可用。")
+    print("  · 真正的算力 MiniMax H3（33B 参数 / 精简版权重 39 GB 起）物理上无法打进 exe，")
+    print("    由首次运行时的「⚡ 环境部署」自动安装，或走「离线包导入」零下载复制。")
     print("\n  想跑前端渲染冒烟测试：")
     print("    dist\\AIVerse.exe 8799 --no-open   然后   node tools/ui_smoke.js http://127.0.0.1:8799\n")
     return 0

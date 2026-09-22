@@ -223,9 +223,10 @@ function deployBanner() {
       <div class="spacer" style="flex:1"></div>
       <button class="btn sm primary" data-act="open-runtime">${running ? '查看进度' : '⚡ 一键部署'}</button></div>
     <div class="hint">
-      本客户端只负责编排，所以本体很小。真正出片的 <b>MiniMax H3</b> 是 33B 参数模型，
-      精简版权重 <b>39 GB</b> 起，加上 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB —— 这部分不可能塞进安装包。
-      点「一键部署」，程序会自动装好全部依赖与权重（含 FFmpeg），之后就能用你的显卡本地出片。
+      本客户端只负责编排，所以本体很小；<b>FFmpeg 已内置，导出成片开箱可用</b>。
+      真正出片的 <b>MiniMax H3</b> 是 33B 参数模型，精简版权重 <b>39 GB</b> 起，
+      加上 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB —— 这部分不可能塞进安装包。
+      点「一键部署」，程序会自动装好依赖与权重，之后就能用你的显卡本地出片。
       不方便联网的话，也可以用<b>离线包导入</b>，零下载复制。
     </div>
   </div>`;
@@ -265,14 +266,17 @@ function renderRuntime() {
       <div class="stages">
         <div class="stages-title">说明</div>
         <div class="hint" style="margin:4px 8px">
-          AIVerse 本体只有 <b>9.4 MB</b>，因为它只负责「编排」——
-          剧本、角色、分镜、审核、抽卡、剪辑。
+          AIVerse 只负责「编排」——剧本、角色、分镜、审核、抽卡、剪辑，
+          <b>FFmpeg 已内置</b>，装完就能导出成片。
           <br/><br/>
           真正出片的算力在 <b>MiniMax H3</b>：33B 参数、精简版 <b>39 GB</b> 权重，
-          再加 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB。这些不可能塞进一个 9 MB 的 exe，
+          再加 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB。这些不可能塞进 exe，
           全球所有 AI 桌面应用（含 ComfyUI Desktop / Pinokio / EZlaunch）都是首次运行下载。
           <br/><br/>
           所以这里的做法是：<b>装一次，点一下，剩下的全自动</b>。
+          <br/><br/>
+          卡住了？先看日志里的<b>测速</b>行：源被限速到十几 KB/s 时，
+          程序会自动放弃换下一个，不会一直卡在原地。
         </div>
       </div>
       <div class="side-foot">
@@ -333,12 +337,16 @@ function renderRuntime() {
               ${check(inst.python, 'Python 隔离环境')}
               ${check(inst.torch, 'PyTorch + CUDA')}
               ${check(inst.comfyui, 'ComfyUI 执行引擎')}
-              ${check(inst.ffmpeg, 'FFmpeg')}
+              ${check(inst.ffmpeg, 'FFmpeg',
+                      inst.ffmpeg ? (inst.ffmpeg_bundled ? '随程序自带，开箱可用' : '已部署') : '约 92 MB')}
               ${check(inst.h3_weights, 'MiniMax H3 权重', inst.h3_weights ? '' : '约 39 GB 起')}
             </div>
             <div class="hint" style="margin-top:12px">
               运行时目录：<span class="mono">${esc(r.runtime_dir || '')}</span>
               ${r.disk_used_gb ? ` · 已占用 <b>${r.disk_used_gb} GB</b>` : ''}
+              <br/>
+              FFmpeg 已内置在程序里（导出成片必需，与显卡无关），
+              所以上面只有 H3 相关的部分需要下载。
             </div>
           </div>
         </div>
@@ -1327,10 +1335,12 @@ const ACTIONS = {
       `目标目录：${S.runtime?.runtime_dir || ''}\n` +
       `预计耗时：约 ${plan ? plan.estimated_minutes : '?'} 分钟（取决于网速）\n\n` +
       `过程中可随时取消，已下载部分会保留，下次可续传。\n确认开始？`)) return;
+    // nodes（KJNodes 加速节点）跟着推荐档位走，不要写死 true：
+    // 8G 显存的入门档本来就建议不装，装了只是多一个可能失败的步骤。
     const r = await api.post('/api/runtime/install', {
       mirror: S.runtimePlan?.mirror || 'cn',
       model: S.runtimePlan?.model || null,
-      nodes: true,
+      nodes: S.runtimePlan?.tier ? !!S.runtimePlan.tier.nodes : undefined,
     });
     if (r.ok === false) return toast(r.error, 'bad');
     toast('部署已开始，可离开此页面，后台会继续', 'ok');

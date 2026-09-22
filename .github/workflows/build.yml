@@ -31,12 +31,21 @@ jobs:
       - name: H3 生成链路（假 ComfyUI 端到端，全本地）
         run: python tools/test_h3_mock.py
 
-      # 59 个接口逐个真调 + 9 组行为断言（资产化 / 队列暂停 / H3 状态自洽 /
+      # 59 个接口逐个真调 + 10 组行为断言（资产化 / 队列暂停 / H3 状态自洽 /
       # 审核门级联 / 非法输入停在边界 …）。
       # 只看状态码会漏东西：曾经 59 个接口全返 200 的那一轮里，角色实体一条都没建出来。
       # 全本地，不下载任何东西，所以不标 continue-on-error。
       - name: API 全面巡检（59 接口 + 行为断言）
         run: python tools/test_api_surface.py
+
+      # 全本地：起一快一慢两个假 HTTP 服务，验证「镜像连得上但被限速」时
+      # 会被放弃换源。这是「点了一键部署没反应」的唯一防线，不联网，必须全绿。
+      - name: 下载器：测速排序 + 卡死换源
+        run: python tools/test_mirror.py
+
+      # FFmpeg 已随程序自带，这条盯住「找得到 / 认得出 / 不再重复下载」。
+      - name: FFmpeg 自带链路
+        run: python tools/test_ffmpeg.py
 
       # 真下载 17 MB 验证断点续传/解压。走公网镜像，偶发抖动不该拦发布，
       # 所以标了 continue-on-error —— 红了要去看日志，但不阻断出包。
@@ -114,7 +123,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build AIVerse.exe
+      # FFmpeg 随程序自带（导出成片的唯一硬依赖），打包前抓到 assets/ffmpeg/bin/。
+      # 抓不到时 build_exe.py 只警告不失败，打出来的包仍可用，只是导出前要先装 FFmpeg。
+      - name: Build AIVerse.exe（含内置 FFmpeg）
         run: python build_exe.py
 
       - name: Smoke test（后端 API + 前端渲染）
@@ -207,14 +218,16 @@ jobs:
             | **一键部署器**（自动装下面这一堆） | 同上 | 同上 |
             | Python 隔离环境 + PyTorch + CUDA | 约 1 GB | 首次部署时自动装 |
             | ComfyUI 执行引擎 + 运行依赖 | 约 1.3 GB | 首次部署时自动装 |
-            | FFmpeg（导出用） | 约 92 MB | 首次部署时自动装 |
+            | **FFmpeg（导出成片用）** | **已内置** | 安装包里，装完就能导出 |
             | **MiniMax H3 权重（33B 参数）** | **39.1 / 60.5 / 92.7 GB 三档** | 首次部署时自动下 |
 
             MiniMax H3 是 33B 参数的全模态视频模型，ComfyUI 官方单文件版最小的档位
             （精简版：FL2VA 主模型 + Qwen3-VL 文本编码器 + 视频/音频 VAE + 4 步 Turbo LoRA）
             就是 **39.1 GB**；全能版 60.5 GB，全精度 BF16 版 92.7 GB。
-            没有任何办法把它压进 10 MB 的 exe —— 这不是取舍问题，是物理问题。
+            没有任何办法把它压进安装包 —— 这不是取舍问题，是物理问题。
             ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是「小安装包 + 首次运行下载」。
+            但 **FFmpeg 不在这个范畴里**：它跟显卡无关，是导出成片的唯一硬依赖，
+            所以从 v1.0.6 起直接随程序自带 —— 装完就能导出，不用等 39 GB 下完。
 
             所以我们把「让用户自己去装」变成「点一下全自动装」，并额外提供**离线包**：
 

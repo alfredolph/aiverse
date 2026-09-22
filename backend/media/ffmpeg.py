@@ -1,13 +1,25 @@
 """媒体引擎：FFmpeg 适配 + 字幕 + 导出计划（文档 §29 / §30）。
 
-本机没有 ffmpeg 时不会报错：仍会生成完整的导出计划（concat 清单 / 字幕 / 导出描述），
-并在 UI 中提示「安装 FFmpeg 后即可一键渲染出片」。
+**FFmpeg 从 v1.0.6 起随程序自带**，不再依赖「一键部署」。
+理由：它是导出成片的唯一硬依赖，跟有没有显卡毫无关系 ——
+让用户为了烧个字幕去等 43 GB 的 H3 权重下载，完全说不通。
+
+查找顺序（见 `_bin_dirs`）：
+  1. runtime/ffmpeg/bin      —— 一键部署装的（用户显式装过就以它为准，方便手动升级）
+  2. <exe 同级>/ffmpeg/bin   —— 安装版 / 绿色版随包发的
+  3. <打包内>/ffmpeg/bin     —— PyInstaller 打进 exe 的那份
+  4. 系统 PATH
+
+一份都找不到时也不会报错：仍会生成完整的导出计划（concat 清单 / 字幕 /
+导出描述），并在 UI 中提示「安装 FFmpeg 后即可一键渲染出片」。
 """
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,42 +30,83 @@ _CODEC = {"MP4": "libx264", "H264": "libx264", "H265": "libx265", "AV1": "libsvt
 _PRESET = {"480p": "854x480", "720p": "1280x720", "1080p": "1920x1080", "2K": "2560x1440", "4K": "3840x2160"}
 
 
-def ffmpeg_path() -> Path | None:
-    """找 ffmpeg：优先用一键部署装到 runtime/ 的那份，其次系统 PATH。"""
-    try:
-        from ..core.config import RUNTIME_DIR
-        local = RUNTIME_DIR / "ffmpeg" / "bin" / "ffmpeg.exe"
-        if local.exists():
-            return local
-    except Exception:
-        pass
-    exe = shutil.which("ffmpeg")
+def _bin_dirs() -> list[Path]:
+    """ffmpeg / ffprobe 的查找目录，按优先级排列（去重后返回）。
+
+    以「目录」为单位、而不是「先找到 ffmpeg 再看它旁边有没有 ffprobe」：
+    早先 ffprobe 只在 `ffmpeg_path()` 的同级目录里找，于是 ffmpeg 一旦
+    命中自带那份、而 ffprobe 只装在 runtime 里，ffprobe 就永远找不到。
+    """
+    from ..core.config import BASE_DIR, BUNDLE_DIR, RUNTIME_DIR
+    out, seen = [], set()
+    for d in (RUNTIME_DIR / "ffmpeg" / "bin",
+              BASE_DIR / "ffmpeg" / "bin",
+              BUNDLE_DIR / "ffmpeg" / "bin"):
+        key = str(d).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+def _find(name: str) -> Path | None:
+    for d in _bin_dirs():
+        try:
+            p = d / name
+            if p.exists():
+                return p
+        except OSError:
+            continue
+    exe = shutil.which(name[:-4] if name.lower().endswith(".exe") else name)
     return Path(exe) if exe else None
+
+
+def ffmpeg_path() -> Path | None:
+    """找 ffmpeg：优先一键部署装到 runtime/ 的那份，其次随程序自带的那份。"""
+    return _find("ffmpeg.exe")
 
 
 def ffprobe_path() -> Path | None:
-    p = ffmpeg_path()
-    if p:
-        probe = p.with_name("ffprobe.exe")
-        if probe.exists():
-            return probe
-    exe = shutil.which("ffprobe")
-    return Path(exe) if exe else None
+    return _find("ffprobe.exe")
 
 
-def detect() -> dict[str, Any]:
+_DETECT_CACHE: tuple[float, dict[str, Any]] | None = None
+_DETECT_LOCK = threading.Lock()
+
+
+def detect(fresh: bool = False) -> dict[str, Any]:
+    """探测 ffmpeg 是否可用（结果缓存 30 秒）。
+
+    `/api/meta` 与 `/api/runtime/plan` 都会调它，而每次探测都要起一个子进程
+    跑 `ffmpeg -version`，不缓存的话页面刷新一下就多花几百毫秒。
+    """
+    global _DETECT_CACHE
+    with _DETECT_LOCK:
+        hit = _DETECT_CACHE
+    if not fresh and hit and time.time() - hit[0] < 30.0:
+        return dict(hit[1])
+
     p = ffmpeg_path()
     if not p:
-        return {"available": False, "path": None, "version": None,
-                "hint": "未检测到 FFmpeg。在「环境部署」里一键安装，或自行安装后加入 PATH。"}
-    try:
-        out = subprocess.run([str(p), "-version"], capture_output=True, text=True, timeout=8,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        first = (out.stdout or "").splitlines()[0] if out.stdout else ""
-        return {"available": True, "path": str(p), "version": first,
-                "bundled": "runtime" in str(p).lower(), "hint": "FFmpeg 可用"}
-    except Exception as e:
-        return {"available": False, "path": str(p), "version": None, "hint": f"FFmpeg 探测失败：{e}"}
+        res = {"available": False, "path": None, "version": None, "bundled": False,
+               "hint": "未检测到 FFmpeg。正式安装包里会自带一份；"
+                       "从源码运行时可在「环境部署」里单独安装。"}
+    else:
+        bundled = "runtime" not in str(p).lower()
+        try:
+            out = subprocess.run([str(p), "-version"], capture_output=True, text=True,
+                                 timeout=8,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            first = (out.stdout or "").splitlines()[0] if out.stdout else ""
+            res = {"available": True, "path": str(p), "version": first, "bundled": bundled,
+                   "hint": "FFmpeg 可用（随程序自带）" if bundled else "FFmpeg 可用"}
+        except Exception as e:
+            res = {"available": False, "path": str(p), "version": None, "bundled": bundled,
+                   "hint": f"FFmpeg 探测失败：{e}"}
+
+    with _DETECT_LOCK:
+        _DETECT_CACHE = (time.time(), res)
+    return dict(res)
 
 
 def _aspect_size(aspect: str, resolution: str) -> str:

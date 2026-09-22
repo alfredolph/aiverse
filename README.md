@@ -29,23 +29,27 @@
 
 ## 零、先把体积说清楚（最重要的一节）
 
-打开安装包你会看到它只有 **约 10 MB**。这不是缺东西，而是分工：
+打开安装包你会看到它只有 **约 40 MB**。这不是缺东西，而是分工：
 
 | 组成 | 大小 | 装在哪 |
 |---|---|---|
 | **编排大脑**（本项目） | **约 10 MB** | 安装包里，双击即用 |
 | 剧本/角色/场景/分镜 Agent、审核门、抽卡、局部重生成、时间线、字幕、剪辑导出 | 同上 | 同上 |
 | **一键部署器**（自动装下面这一堆） | 同上 | 同上 |
+| **FFmpeg（导出成片用）** | **已内置** | 安装包里，装完就能导出 |
 | Python 隔离环境 + PyTorch + CUDA | 约 1 GB | 首次部署时自动装 |
 | ComfyUI 执行引擎 + 运行依赖 | 约 1.3 GB | 首次部署时自动装 |
-| FFmpeg（导出用） | 约 92 MB | 首次部署时自动装 |
 | **MiniMax H3 权重（33B 参数）** | **39.1 / 60.5 / 92.7 GB 三档** | 首次部署时自动下 |
 
 **H3 是一个 33B 参数的全模态视频模型，ComfyUI 官方单文件版最小的档位就是 39.1 GB
 （全能版 60.5 GB，全精度 BF16 版 92.7 GB）。** 这些数字是对着 HuggingFace 上
 `Comfy-Org/MiniMax-H3` 的真实文件字节数加出来的，不是估的。
-没有任何办法把它压进一个 10 MB 的 exe —— 这不是取舍问题，是物理问题。
+没有任何办法把它压进一个安装包 —— 这不是取舍问题，是物理问题。
 ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是「小安装包 + 首次运行下载」这条路。
+
+**但 FFmpeg 不在这个范畴里。** 它是导出成片（拼接、转码、烧字幕）的唯一硬依赖，
+跟有没有 N 卡毫无关系 —— 为了烧个字幕让用户先等完 39 GB 的权重下载，说不通。
+所以从 **v1.0.6 起 FFmpeg 随程序自带**：装完就能导出成片。
 
 所以我们把「让用户自己去装」变成「点一下全自动装」，并且额外提供**离线包**：
 
@@ -119,14 +123,15 @@ python run.py --host 0.0.0.0  # 开放局域网（手机控制）
 ```
 硬件检测 → uv 运行时管理器 → Python 3.12 隔离环境 → 创建 venv
         → PyTorch + CUDA → ComfyUI 源码包 → ComfyUI 依赖
-        → H3 加速节点（KJNodes，可选）→ 下载 H3 权重 → FFmpeg → 写工作流 + 注册 Provider
+        → H3 加速节点（KJNodes，可选）→ 下载 H3 权重
+        → FFmpeg（已内置则跳过）→ 写工作流 + 注册 Provider
 ```
 
 每一步都是真动作，没有占位进度条：
 
 | 步骤 | 实际执行的东西 |
 |---|---|
-| uv / FFmpeg / ComfyUI / KJNodes | 从 GitHub 下 zip（国内走 ghproxy 镜像）→ 校验字节数 → 解压到 `runtime/` 下对应位置 |
+| uv / ComfyUI / KJNodes（以及 FFmpeg 缺失时） | 从 GitHub 下 zip（国内走 ghproxy 镜像）→ **按实测速度排序** → 校验字节数 → 解压到 `runtime/` 下对应位置 |
 | Python / venv / 依赖 | `uv python install 3.12`、`uv venv`、`uv pip install -r requirements.txt` |
 | PyTorch | `uv pip install torch torchvision torchaudio --index-url <镜像>` |
 | H3 权重 | 调 `modelscope.snapshot_download` / `huggingface_hub.snapshot_download`，**按文件白名单**下载 |
@@ -149,6 +154,12 @@ HF 与 ModelScope 同名同结构），目录结构与 ComfyUI 的 `models/` 一
 其他要点：
 
 - **镜像可选**：国内（ModelScope / 清华源 / 上海交大 torch 源）或海外（HuggingFace）。国内线路下 39 GB 大约快 3~10 倍
+- **连得上但太慢，也算失败**：下载前先给每个源测一遍速（只读前 768 KB，按域名缓存 10 分钟），
+  快的排前面；下载途中每 12 秒结算一次平均速度，低于 **96 KB/s** 就放弃、换下一个源。
+  这一步是 v1.0.6 为「点了一键部署没反应」补的：实测 ghproxy / gh-proxy / github 三个源
+  曾**全部**被限速到 12~15 KB/s，而它们连得上、也不报错，旧逻辑就一直挂在原地慢慢爬 ——
+  17 MB 的 uv 跑了 2 分 22 秒才下到 2 MB，进度条停在 11% 一动不动。
+  现在日志里会写明「xx 太慢：41 KB/s，放弃换源」，全都慢时直接给出可操作的下一步建议
 - **断点续传**：HTTP Range 续传 + 多镜像自动回退；关掉程序再打开，已下载的部分不重来
 - **续传必须校验**：`.part` 旁边会留一份 `.part.meta` 记录「来源 URL + 远端总大小」。
   对不上就丢弃重下，字节数不足就**不改名**、保留断点。
@@ -159,7 +170,7 @@ HF 与 ModelScope 同名同结构），目录结构与 ComfyUI 的 `models/` 一
 - **不污染系统**：所有东西都进 `runtime/`，不动注册表、不改 PATH、不装全局 Python 包
 - **自动识别节点与权重**：连上 ComfyUI 后读 `/object_info` 自动映射节点类名，扫 `models/` 自动认出
   用的是哪个精度版本的权重；提交任务前还会拿 `/object_info` 把工作流校验一遍
-- **没 N 卡也能用**：自动降级为「只装 FFmpeg」，生成走云端 Provider，导出照常出片
+- **没 N 卡也能用**：自动跳过权重下载（FFmpeg 本来就内置），生成走云端 Provider，导出照常出片
 
 ### 这一版是「对着源头逐条核过」的
 
@@ -345,7 +356,7 @@ aiverse/
 | 真实出图 | 启动本地 ComfyUI（一键部署已含），`ComfyUIImageProvider` 已实现提交/轮询/取回 |
 | 真实视频（H3） | 一键部署 → 点「启动 ComfyUI」→ 点「🩺 检测 H3 环境」→ 自动识别节点并接管 |
 | 真实配音 | 接入 MiniMax / Edge TTS，补全 `CloudTTSProvider.speak()` |
-| 真实出片 | 一键部署已含 FFmpeg；界面「FFmpeg 未安装」会自动变为「就绪」，导出即出真实 MP4 |
+| 真实出片 | FFmpeg 已随程序自带，装完即可导出真实 MP4（不用等 39 GB 的 H3 权重下完）；镜头是真的还是占位的，取决于接的是本地 H3 还是云端 Provider |
 
 所有 Provider 失败时都会**自动回退**到内置占位实现，不会中断流程。
 
@@ -468,7 +479,9 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 | H3 生成链路 | `tools/test_h3_mock.py` 起一个假 ComfyUI，端到端跑通「提交 → 轮询 → 取回 MP4」；假 ComfyUI 的节点定义与输入名照 `comfy_extras/nodes_minimax_h3.py` 写 |
 | 一键部署 | `tools/test_deploy_slice.py` 从真实计划里挑最小的一步，真下载 → 解压 → 落盘 → exe 真执行 → 写 `state.json` → 再跑一遍确认幂等跳过；`--with-comfyui` 再多下 ComfyUI 源码包与 KJNodes，核对落点 |
 | 下载器 | `tools/test_downloader.py` 真下载 + 逐字节比对续传 + 垃圾缓存丢弃 + 取消 |
-| 59 个 API | `tools/test_api_surface.py` 逐个真调，5xx 一律算失败，外加 9 组行为断言 |
+| 换源 | `tools/test_mirror.py` 起一快一慢两个本地 HTTP 服务，验证「连得上但被限速」时按实测速度排序、下载途中放弃慢源换下一个、全是慢源时报人话（不联网，全绿才算过） |
+| FFmpeg 自带 | `tools/test_ffmpeg.py` 验证查找顺序（runtime > 自带 > PATH）、`ffprobe` 能独立于 `ffmpeg` 找到、自带可用时部署计划不再重复下载它 |
+| 59 个 API | `tools/test_api_surface.py` 逐个真调，5xx 一律算失败，外加 10 组行为断言 |
 | 权重清单与体积 | 用 HuggingFace API 列出 `Comfy-Org/MiniMax-H3` 的全部文件与真实字节数，12 个文件名、三个档位合计逐个对上 |
 | 节点类名 / 输入名 / 帧数规则 | 对着 ComfyUI 源码 `comfy_extras/nodes_minimax_h3.py` 与官方模板 `video_minimax_h3_i2v.json` 逐条核对（拓扑、输入名、`length` 的 `17k+5` 步长、默认采样器 `res_multistep` 与调度器 `simple`） |
 
@@ -494,6 +507,53 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 ---
 
 ## 九、更新日志
+
+### v1.0.6 —— 「点了一键部署没反应」+ FFmpeg 改为随程序自带
+
+起因是一句很具体的反馈：「点击环境部署还是没有用，要自带 FFmpeg」。
+于是真跑了一遍部署，把日志拉出来看，发现「没反应」是两个不同的问题。
+
+**问题一：镜像连得上，但被限速到爬。** 实测 ghproxy.net / gh-proxy.com / github.com
+三个源**全都**返回 206、HTTP 层没有任何错误，但吞吐只有 12~15 KB/s。
+17 MB 的 uv 跑了 2 分 22 秒只下到 2 MB，进度条停在 11% 一动不动 ——
+用户看到的现象就是「点了没反应」，而不是报错。
+
+- **修**：下载器只判断「请求成功与否」是不够的，现在拿**实测吞吐**当判据。
+  开工前先给每个源测一遍速（只读前 768 KB，结果按域名缓存 10 分钟），快的排前面；
+  下载途中每 12 秒结算一次平均速度，低于 **96 KB/s** 就放弃当前源换下一个。
+- **修**：所有源都慢时，不再笼统报「全部镜像下载失败」，而是逐个列出实测速度，
+  并给出下一步建议（换「海外直连」、或用离线包导入）。
+- **修**：测速结果和换源原因会写进部署日志，不再只更新进度条数字 ——
+  否则用户只会看到进度忽然归零重来，完全不知道发生了什么。
+- **修（顺带）**：`state.json` 原来每收到一个 256 KB 分片就重写一遍。
+  43 GB 意味着十几万次写盘，光这个就够把下载拖慢。现在落盘每秒最多一次，
+  而状态**变化**（步骤开始/结束、部署成功/失败）仍然立刻写，中途关程序不丢进度。
+- **加**：`tools/test_mirror.py` —— 起一快一慢两个本地 HTTP 服务，
+  把「测速排序」「下载中发现太慢就换源」「全是慢源时报人话」三条路径钉住。
+
+**问题二：FFmpeg 不该等 39 GB 下载完才有。** 它是导出成片（拼接、转码、烧字幕）
+的**唯一**硬依赖，跟有没有 N 卡毫无关系 —— 为了烧个字幕让人先等完 H3 权重，说不通。
+
+- **加**：FFmpeg 现在**随程序自带**。构建期由 `tools/fetch_ffmpeg.py` 抓到
+  `assets/ffmpeg/bin/`，分别打进 `AIVerse.exe`（PyInstaller datas）和安装目录
+  （Inno Setup `[Files]`）。绿色版双击即用、安装版装完即用，都能直接导出成片。
+- **修（查找顺序）**：`ffmpeg_path()` 以前只认 `runtime/ffmpeg` 和 PATH，
+  自带的那份根本不在查找范围内。现在按
+  `runtime/（部署装的）→ exe 同级 → 打包内 → PATH` 找，部署装过的那份优先，
+  方便用户手动升级。
+- **修（ffprobe 会丢）**：`ffprobe` 以前只在 `ffmpeg` 的**同级目录**里找，
+  于是 ffmpeg 命中自带那份、而 ffprobe 只装在 runtime 里时，ffprobe 永远找不到。
+  现在两者各自独立地在所有候选目录里找。
+- **修**：部署计划里 FFmpeg 那一步，检测到已经有可用的 FFmpeg 就直接跳过
+  （不再白下 92 MB）；一份都没有时仍然排上，否则导出成片就没有任何指望。
+- **修**：前端「开始一键部署」把 `nodes` 写死成 `true`，8G 显存的入门档
+  本来建议不装 KJNodes，硬装上只是多一个可能失败的步骤。现在跟着推荐档位走。
+- **加**：`tools/test_ffmpeg.py` —— 盯住「找得到 / 认得出 / 不再重复下载」，
+  包括 ffprobe 与 ffmpeg 不在同一处的组合。
+
+> 顺带把版本号从测试里抽出来了：`test_api_surface.py` 和 `verify_release_export.py`
+> 原来把 `1.0.5` 写死在断言里，每次发版都得记得改，漏改就是一次假失败，
+> 看起来像接口坏了。现在分别从 `core.config.VERSION` 和 `TAG` 读。
 
 ### v1.0.5 —— 「返回修改」原来不生效，审核门也拦不住
 

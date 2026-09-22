@@ -151,7 +151,13 @@ def build_plan(mirror: str = "cn", model_key: str | None = None,
         warnings.append("跳过模型下载（无可用 GPU）。生成将走云端 Provider")
 
     # ---- 8. FFmpeg -------------------------------------------------
-    if include_ffmpeg:
+    # FFmpeg 是「导出成片」的**唯一**硬依赖，跟有没有显卡毫无关系。
+    # 从 v1.0.6 起它随程序一起发（安装目录 / 绿色版 exe 内置），
+    # 所以这里默认不再排这一步 —— 用户装完就能导出，不用等 43 GB 的部署。
+    # 只有「找不到自带的那份」时才回退到下载，比如直接从源码跑、或用户手动删了。
+    from ..media import ffmpeg as _ffmpeg
+    ffmpeg_now = _ffmpeg.detect()
+    if include_ffmpeg and not ffmpeg_now.get("available"):
         step("ffmpeg", "部署 FFmpeg 7.1",
              "视频合成 / 转码 / 字幕烧录，导出 MP4 必需",
              "download_zip", 0.09)

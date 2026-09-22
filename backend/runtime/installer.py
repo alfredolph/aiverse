@@ -28,11 +28,18 @@ COMFY_URL = "http://127.0.0.1:8188"
 class Installer:
     """单例式部署器（同一时间只允许一个部署任务）。"""
 
+    # state.json 的落盘节流窗口（秒）。
+    # 下载回调是每 256 KB 一次，43 GB 就是十几万次 —— 每次都重写一遍
+    # state.json 的话，光是这些写盘就够把下载拖慢，而且 SSD 白写几十 GB。
+    _SAVE_INTERVAL = 1.0
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self._state: dict[str, Any] = self._load()
+        self._last_save = 0.0
+        self._dirty = False
         # 可选步骤（KJNodes 之类）失败时记在这里：部署照样算成功，
         # 但状态里要留着，别让用户以为「全部装好了」
         self._optional_failed: list[str] = []
@@ -46,10 +53,33 @@ class Installer:
                 pass
         return {"status": "idle", "steps": {}, "log": [], "plan": None}
 
-    def _save(self) -> None:
-        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(self._state, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+    def _save(self, force: bool = False) -> None:
+        """把内存状态写进 state.json。
+
+        默认节流：高频的下载进度只改内存（`status()` 读的也是内存，前端照样实时），
+        落盘最多每秒一次。状态**变化**的地方（步骤开始/结束、部署成功/失败）
+        都传 force=True，保证中途关掉程序也能看到真实进度。
+        """
+        now = time.time()
+        with self._lock:
+            if not force and now - self._last_save < self._SAVE_INTERVAL:
+                self._dirty = True
+                return
+            self._last_save = now
+            self._dirty = False
+            snapshot = json.dumps(self._state, ensure_ascii=False, indent=2)
+        try:
+            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(snapshot, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _flush(self) -> None:
+        """把节流期间攒下的改动补写一次（收尾时必须调，否则最后一段进度会丢）。"""
+        with self._lock:
+            pending = self._dirty
+        if pending:
+            self._save(force=True)
 
     def _log(self, msg: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {msg}"
@@ -81,12 +111,18 @@ class Installer:
     def _detect_installed(self) -> dict[str, Any]:
         rt = RUNTIME_DIR
         venv_py = rt / "venv" / "Scripts" / "python.exe"
+        # ffmpeg 从 v1.0.6 起随程序自带，所以这里问的是「能不能用」，
+        # 而不是「runtime/ffmpeg 里有没有」—— 前者才决定导出成片行不行。
+        from ..media import ffmpeg as ffmpeg_mod
+        fdet = ffmpeg_mod.detect()
         return {
             "uv": (rt / "uv" / "uv.exe").exists(),
             "python": (rt / "venv" / "pyvenv.cfg").exists(),
             "torch": _has_package(venv_py, "torch"),
             "comfyui": (rt / "comfyui" / "main.py").exists(),
-            "ffmpeg": (rt / "ffmpeg" / "bin" / "ffmpeg.exe").exists(),
+            "ffmpeg": bool(fdet.get("available")),
+            "ffmpeg_bundled": bool(fdet.get("bundled")),
+            "ffmpeg_path": fdet.get("path"),
             "h3_weights": _model_ready(rt / "comfyui" / "models"),
             "comfy_running": _comfy_alive(COMFY_URL),
         }
@@ -108,7 +144,7 @@ class Installer:
                 "started_at": time.time(), "finished_at": None, "error": None,
             }
             self._cancel.clear()
-            self._save()
+            self._save(force=True)
             self._thread = threading.Thread(target=self._run, args=(plan,),
                                             name="aiverse-installer", daemon=True)
             self._thread.start()
@@ -132,10 +168,16 @@ class Installer:
         with self._lock:
             self._state.setdefault("steps", {}).setdefault(key, {})
             self._state["steps"][key].update(fields)
-        self._save()
+        # 步骤「开始 / 结束」这类状态变化必须立刻落盘；只有纯进度数字走节流
+        self._save(force=fields.get("status") not in (None, "running"))
 
     def _progress_cb(self, key: str):
         def cb(d: dict) -> None:
+            phase = d.get("phase")
+            # 测速结果和换源原因要写进日志 —— 否则用户只会看到进度条
+            # 忽然从 11% 归零重来，完全不知道发生了什么。
+            if phase in ("probe", "retry") and d.get("message"):
+                self._log("  · " + d["message"])
             self._set_step(key,
                            status="running",
                            percent=d.get("percent", 0.0),
@@ -199,7 +241,7 @@ class Installer:
                 self._state["finished_at"] = time.time()
                 if self._optional_failed:
                     self._state["optional_failed"] = list(self._optional_failed)
-            self._save()
+            self._save(force=True)
             invalidate_cache()
             if self._optional_failed:
                 self._log("部署完成，但有可选步骤失败（不影响出片）："
@@ -211,14 +253,14 @@ class Installer:
             with self._lock:
                 self._state["status"] = "cancelled"
                 self._state["finished_at"] = time.time()
-            self._save()
+            self._save(force=True)
             self._log("部署已取消")
         except Exception as e:
             with self._lock:
                 self._state["status"] = "failed"
                 self._state["error"] = str(e)
                 self._state["finished_at"] = time.time()
-            self._save()
+            self._save(force=True)
             self._log(f"部署失败：{e}")
 
     def _already_done(self, s: dict) -> bool:
@@ -244,6 +286,9 @@ class Installer:
                             / "ComfyUI-KJNodes" / "__init__.py").exists(),
             "model-tool": False,
             "h3-weights": inst["h3_weights"],
+            # ffmpeg 随程序自带，所以「已装」的判据是「能找到能用的 ffmpeg」，
+            # 而不是「runtime/ffmpeg 里有一份」。否则自带的那份会被无视，
+            # 白白多下一遍 92 MB。
             "ffmpeg": inst["ffmpeg"],
             "wire": (rt / "wired.json").exists(),
         }.get(key, False)
@@ -510,7 +555,7 @@ class Installer:
                 "started_at": time.time(), "finished_at": None, "error": None,
             }
             self._cancel.clear()
-            self._save()
+            self._save(force=True)
             self._thread = threading.Thread(target=self._run_import, args=(root,),
                                             name="aiverse-import", daemon=True)
             self._thread.start()
@@ -566,7 +611,7 @@ class Installer:
             with self._lock:
                 self._state["status"] = "done"
                 self._state["finished_at"] = time.time()
-            self._save()
+            self._save(force=True)
             invalidate_cache()
             self._log("离线运行时导入完成，可以开始本地出片了")
 
@@ -574,14 +619,14 @@ class Installer:
             with self._lock:
                 self._state["status"] = "cancelled"
                 self._state["finished_at"] = time.time()
-            self._save()
+            self._save(force=True)
             self._log("导入已取消")
         except Exception as e:
             with self._lock:
                 self._state["status"] = "failed"
                 self._state["error"] = str(e)
                 self._state["finished_at"] = time.time()
-            self._save()
+            self._save(force=True)
             self._log(f"导入失败：{e}")
 
 

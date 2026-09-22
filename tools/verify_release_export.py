@@ -29,7 +29,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TAG = "v1.0.5"
+TAG = "v1.0.6"
 PORT = 8796
 FFMPEG_KEEP = Path(r"C:\Users\Administrator\AppData\Local\Temp\av_ffmpeg_keep\ffmpeg\bin")
 
@@ -117,8 +117,10 @@ def main() -> int:
         kill_tree(proc)
         return 1
     health = api("/api/health")
-    need(health.get("version") == "1.0.5",
-         f"版本应为 1.0.5，实际 {health.get('version')}",
+    # 跟 TAG 对齐，而不是写死：写死的话每次发版都要记得改，漏改就是一次假失败。
+    expect = TAG.lstrip("v")
+    need(health.get("version") == expect,
+         f"版本应为 {expect}，实际 {health.get('version')}",
          f"版本 {health.get('version')}")
 
     proj = None
@@ -246,7 +248,7 @@ def main() -> int:
             print("   · " + f)
         shutil.rmtree(tmp, ignore_errors=True)
         return 1
-    print("✓ Release 里的 v1.0.5 绿色版，真的导出了可播放的 MP4")
+    print("✓ Release 里的 {TAG} 绿色版，真的导出了可播放的 MP4")
     shutil.rmtree(tmp, ignore_errors=True)
     return 0
 

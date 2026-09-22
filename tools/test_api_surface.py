@@ -7,7 +7,7 @@
 这个测试把 `backend.app.ROUTES` 里注册的每一个接口都真调一遍：
     * 5xx 一律算失败（接口内部异常会被兜成 500 并带 trace）
     * 最后报「覆盖了几个 / 漏了哪几个」，漏掉必须写明理由
-    * 再加 9 组行为断言 —— 光看状态码不够：59 个接口全返 200 的那一轮里，
+    * 再加 10 组行为断言 —— 光看状态码不够：59 个接口全返 200 的那一轮里，
       角色实体其实一条都没建出来，队列暂停也只是回了个 200 而已。
 
 用法：
@@ -339,10 +339,13 @@ def main() -> int:
         if not cond:
             fail.append(bad_msg)
 
-    print("\n[断言 1/9] 返回体不是空壳，错误路径给的是人话不是 traceback")
+    print("\n[断言 1/10] 返回体不是空壳，错误路径给的是人话不是 traceback")
     _, health = call("GET", "/api/health")
-    check(health.get("version") == "1.0.5",
-          "版本 1.0.5", f"/api/health 版本应为 1.0.5，实际 {health.get('version')}")
+    # 版本号从 config 里读，不要写死 —— 写死的话每次发版都得改测试，
+    # 而「忘了改」会伪装成一次真失败，让人以为是接口坏了。
+    from backend.core.config import VERSION
+    check(health.get("version") == VERSION,
+          f"版本 {VERSION}", f"/api/health 版本应为 {VERSION}，实际 {health.get('version')}")
     _, shots_d = call("GET", f"/api/projects/{demo['id']}/shots")
     check(bool((shots_d or {}).get("shots")), "示例项目有分镜", "示例项目应有分镜")
     _, st = call("GET", f"/api/projects/{demo['id']}/stages")
@@ -358,7 +361,7 @@ def main() -> int:
               f"写错模型版本 → {code}「{str(bad.get('error'))[:40]}…」",
               f"写错模型版本应回 400 + 可读提示，实际 {code} {str(bad)[:160]}")
 
-    print("\n[断言 2/9] 角色 / 场景 / 道具真的被资产化了")
+    print("\n[断言 2/10] 角色 / 场景 / 道具真的被资产化了")
     # 这条是踩出来的：管线只抽卡不落实体，于是 8 阶段全绿、角色面板却是空的，
     # 分镜里的角色还会被质量检查报成「未资产化」。
     for kind, label in (("character", "角色"), ("scene", "场景"), ("prop", "道具")):
@@ -368,7 +371,7 @@ def main() -> int:
         check(bool(items), f"{label} {len(items)} 条：{names}",
               f"示例项目跑完 8 阶段，{label}实体却是 0 条")
 
-    print("\n[断言 3/9] 资产的状态与版本字段可用")
+    print("\n[断言 3/10] 资产的状态与版本字段可用")
     _, r = call("GET", f"/api/projects/{demo['id']}/entities?kind=character")
     first = ((r or {}).get("entities") or [{}])[0]
     check(first.get("status") in ("DRAFT", "REVIEW", "APPROVED", "FINAL"),
@@ -387,7 +390,7 @@ def main() -> int:
           f"连续快照正常，累计 {(s2 or {}).get('versions')} 版",
           f"连续快照失败：{code2} {str(s2)[:140]}")
 
-    print("\n[断言 4/9] 队列暂停是真的暂停（不是只回了个 200）")
+    print("\n[断言 4/10] 队列暂停是真的暂停（不是只回了个 200）")
     call("POST", "/api/queue/pause")
     _, vg = call("POST", f"/api/projects/{work}/video/generate",
                  {"shots": [1], "resolution": "480p", "aspect": "9:16"})
@@ -418,7 +421,7 @@ def main() -> int:
     check(done_ok, "继续后任务正常跑完",
           f"继续后任务没跑完，最后状态 {last}")
 
-    print("\n[断言 5/9] H3 接入状态自洽")
+    print("\n[断言 5/10] H3 接入状态自洽")
     _, h3 = call("GET", "/api/runtime/h3")
     check(all(k in h3 for k in ("is_active", "connected", "detail", "provider_id")),
           f"H3 字段齐全（active={h3.get('active')} is_active={h3.get('is_active')}"
@@ -434,7 +437,7 @@ def main() -> int:
           "没有任何视频 Provider")
 
     # 下面三条对应 v1.0.5 修掉的东西。放在最后跑：它们会改动示例项目的阶段状态。
-    print("\n[断言 6/9] 「返回修改」把下游一并作废（审核门级联）")
+    print("\n[断言 6/10] 「返回修改」把下游一并作废（审核门级联）")
     # 起因：reopen 只改当前阶段，下游依旧是 APPROVED；而 gate 只看紧邻一段，
     # 于是「角色回退之后还能直接跑分镜」—— 新分镜建立在已经失效的角色资产上。
     demo_id = demo["id"]
@@ -454,13 +457,13 @@ def main() -> int:
                 if amap.get(k) in ("APPROVED", "FINAL")]
     check(not still_ok, "下游全部退回草稿", f"下游仍标着已通过：{still_ok}")
 
-    print("\n[断言 7/9] 审核门挡住「跳过已失效的上游」")
+    print("\n[断言 7/10] 审核门挡住「跳过已失效的上游」")
     _, rr7 = call("POST", f"/api/projects/{demo_id}/stage/storyboard/run", {})
     check((rr7 or {}).get("ok") is False and (rr7 or {}).get("blocked_by") == "characters",
           f"分镜被挡回：{(rr7 or {}).get('error')}",
           f"角色回退后仍能直接跑分镜，审核门被绕过：{str(rr7)[:160]}")
 
-    print("\n[断言 8/9] 任务接口不再「假成功」")
+    print("\n[断言 8/10] 任务接口不再「假成功」")
     _, gc = call("POST", "/api/tasks/t_ghost_xyz/cancel")
     check((gc or {}).get("ok") is False and "不存在" in str((gc or {}).get("error", "")),
           f"取消不存在的任务 → {gc}",
@@ -470,7 +473,7 @@ def main() -> int:
           f"插队不存在的任务 → {gb}",
           f"插队不存在的任务应如实报错，实际回了个「成功」：{gb}")
 
-    print("\n[断言 9/9] 非法输入停在边界，不会凭空建项目 / 不会排注定失败的任务")
+    print("\n[断言 9/10] 非法输入停在边界，不会凭空建项目 / 不会排注定失败的任务")
     _, nb = call("GET", "/api/projects")
     n_before = len((nb or {}).get("projects") or [])
     raw_code, raw_body = call_raw("POST", "/api/projects", b"{not json at all")
@@ -492,6 +495,25 @@ def main() -> int:
     check(pcode == 400 and not ghost,
           f"未知 Provider 类型 → {pcode}「{str((pbody or {}).get('error'))[:34]}…」",
           f"未知 Provider 类型应回 400 且不入库，实际 {pcode}，库里还有 {len(ghost)} 条幽灵记录")
+
+    print("\n[断言 10/10] 部署计划与「FFmpeg 是否已可用」自洽")
+    _, st = call("GET", "/api/runtime/status")
+    inst = (st or {}).get("installed") or {}
+    check("ffmpeg" in inst and "ffmpeg_bundled" in inst,
+          f"部署状态里 ffmpeg 字段齐全（available={inst.get('ffmpeg')} "
+          f"bundled={inst.get('ffmpeg_bundled')}）",
+          f"部署状态缺 ffmpeg 字段：{sorted(inst)}")
+    _, pl = call("GET", "/api/runtime/plan?mirror=cn")
+    steps = ((pl or {}).get("plan") or {}).get("steps") or []
+    has_ff = any(s["key"] == "ffmpeg" for s in steps)
+    # FFmpeg 从 v1.0.6 起随程序自带，自带的那份能用就不该再排一次下载；
+    # 反过来，一份都没有时必须排上 —— 否则导出成片就没有任何指望了。
+    if inst.get("ffmpeg"):
+        check(not has_ff, "FFmpeg 已可用，部署计划里不再重复下载它",
+              "FFmpeg 已经能用，计划里却还要再下一次（白下 92 MB）")
+    else:
+        check(has_ff, "FFmpeg 不可用时，部署计划里必须排上下载",
+              "本机没有可用的 FFmpeg，计划里却没有部署它的步骤 —— 导出成片会一直失败")
 
     httpd.shutdown()
 
