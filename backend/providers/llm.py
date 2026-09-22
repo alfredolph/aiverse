@@ -125,26 +125,44 @@ def _extract_names(text: str) -> list[str]:
 
 
 def _extract_scenes(text: str) -> list[str]:
-    scenes: list[str] = []
+    explicit: list[str] = []   # 显式写出来的场景标记，可信
+    guess: list[str] = []      # 靠介词猜出来的地点，得复核
+
     # 显式场景标记 【xx】（xx）
     for m in re.finditer(r"[【\[（(]([^】\]）)]{2,16})[】\]）)]", text):
-        scenes.append(m.group(1).strip())
+        explicit.append(m.group(1).strip())
     # 「场景：xx」「地点：xx」
     for m in re.finditer(r"(?:场景|地点|内景|外景)[：:]\s*([^\n，。；]{2,16})", text):
-        scenes.append(m.group(1).strip())
+        explicit.append(m.group(1).strip())
     # 介词 + 地点
     for m in re.finditer(r"(?:在|来到|走进|进入|回到|站在|推开)([\u4e00-\u9fa5]{2,8}?)(?:里|内|中|外|前|后|门口|之中|的木门|的门)", text):
-        scenes.append(m.group(1).strip())
+        guess.append(m.group(1).strip())
 
-    seen, out = set(), []
-    for s in scenes:
+    def clean(s: str) -> str:
+        s = re.sub(r"^(?:场景|地点|内景|外景)\s*", "", s)
         # 去掉尾部时间词
-        s = re.sub(r"[\s·,，]*(日|夜|黄昏|清晨|白天|晚上|傍晚)$", "", s).strip()
-        s = re.sub(r"\s+", " ", s)
-        if 2 <= len(s) <= 16 and s not in seen:
+        s = re.sub(r"[\s·,，]*(日|夜|黄昏|清晨|早晨|凌晨|白天|晚上|傍晚|午后|晨|午)$",
+                   "", s).strip()
+        return re.sub(r"\s+", " ", s)
+
+    def keep(pairs: list[tuple[str, bool]]) -> list[str]:
+        seen, out = set(), []
+        for s, is_explicit in pairs:
+            if not (2 <= len(s) <= 16) or s in seen:
+                continue
+            # 只被提到过一次的「地点」多半是件东西，不是场景：
+            # 「你要的药，不在箱子里」会猜出「箱子」，「站在一块青石前」会猜出「一块青石」。
+            # 真正的场景在一集里总要反复出现，所以要求出现 ≥2 次。
+            if not is_explicit and text.count(s) < 2:
+                continue
             seen.add(s)
             out.append(s)
-    return out[:12]
+        return out[:12]
+
+    pairs = [(clean(s), True) for s in explicit] + [(clean(s), False) for s in guess]
+    out = keep(pairs)
+    # 过滤太狠就退回去用没过滤的版本 —— 宁可场景名糙一点，也别让分镜全落到「主场景」
+    return out or keep([(clean(s), True) for s in explicit + guess])
 
 
 def _extract_props(text: str) -> list[str]:

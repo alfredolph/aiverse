@@ -45,10 +45,42 @@ class CharacterAgent(Agent):
             g = self._group_key(name)
             if not gacha.list_candidates(self.ctx.pid, "characters", g):
                 self._draw(name, base=c, n=n)
+            self._materialize(name)
             created.append(name)
         engine.set_status(self.ctx.pid, "characters", STATUS["REVIEW"],
                           {"characters": created, "count": len(created)})
         return {"characters": created, "count": len(created)}
+
+    # ---- 资产化 ----------------------------------------------------
+    def _materialize(self, name: str) -> bool:
+        """把抽出来的候选落成角色资产（已经建过就不动）。
+
+        为什么必须有这一步：`_draw()` 只往候选表里塞东西，实体要等用户点「采用」
+        才创建。于是流水线跑完 8 阶段、角色阶段也 APPROVED 了，角色面板却还是空的，
+        「音色」下拉会提示「请先生成角色设计」，质量检查还会把分镜里出现的角色
+        全报成「未资产化」—— 明明都生成过了。
+
+        道具那边本来就在 `SceneAgent.build()` 里 upsert，角色/场景漏了，这里补齐。
+        状态给 DRAFT：审核门的意义还在，用户点「全部通过」才转 APPROVED。
+        """
+        if entities.get_by_name(self.ctx.pid, entities.KIND_CHARACTER, name):
+            return False
+        cands = gacha.list_candidates(self.ctx.pid, "characters", self._group_key(name))
+        if not cands:
+            return False
+        payload = dict(cands[0]["payload"])
+        entities.upsert(self.ctx.pid, entities.KIND_CHARACTER, name, payload, STATUS["DRAFT"])
+        store.write_json(self.ctx.pid, f"characters/{name}/design.json", payload)
+        return True
+
+    def materialize_all(self) -> int:
+        """把所有已抽出的候选都落成资产，返回新建数量。幂等。"""
+        n = 0
+        for c in gacha.list_candidates(self.ctx.pid, "characters"):
+            name = (c.get("payload") or {}).get("name") or ""
+            if name and self._materialize(name):
+                n += 1
+        return n
 
     def _group_key(self, name: str) -> str:
         return f"char:{name}"
@@ -125,11 +157,15 @@ class SceneAgent(Agent):
             g = f"scene:{name}"
             if not gacha.list_candidates(self.ctx.pid, "scenes", g):
                 self._draw(name, base=s, n=n)
+            self._materialize(name)
             created_s.append(name)
         for p in props:
             name = p.get("name") or "道具"
-            payload = {"name": name, "desc": p.get("desc", ""), "style": self.ctx.style["name"]}
-            entities.upsert(self.ctx.pid, entities.KIND_PROP, name, payload, STATUS["DRAFT"])
+            # 已经建过就不动：重复跑 build 不该让版本号虚涨
+            if not entities.get_by_name(self.ctx.pid, entities.KIND_PROP, name):
+                payload = {"name": name, "desc": p.get("desc", ""), "style": self.ctx.style["name"]}
+                entities.upsert(self.ctx.pid, entities.KIND_PROP, name, payload, STATUS["DRAFT"])
+                store.write_json(self.ctx.pid, f"props/{name}/design.json", payload)
             created_p.append(name)
         engine.set_status(self.ctx.pid, "scenes", STATUS["REVIEW"],
                           {"scenes": created_s, "props": created_p,
@@ -137,11 +173,41 @@ class SceneAgent(Agent):
         return {"scenes": created_s, "props": created_p,
                 "count": len(created_s) + len(created_p)}
 
+    # ---- 资产化 ----------------------------------------------------
+    def _materialize(self, name: str) -> bool:
+        """把抽出来的场景候选落成场景资产（已经建过就不动）。
+
+        和 CharacterAgent._materialize 同一个理由：只抽卡不落实体的话，
+        流水线跑完场景面板还是空的，分镜里的场景会被质量检查报成「未资产化」。
+        状态给 DRAFT，等用户点「全部通过」才转 APPROVED。
+        """
+        if entities.get_by_name(self.ctx.pid, entities.KIND_SCENE, name):
+            return False
+        cands = gacha.list_candidates(self.ctx.pid, "scenes", self._group_key(name))
+        if not cands:
+            return False
+        payload = dict(cands[0]["payload"])
+        entities.upsert(self.ctx.pid, entities.KIND_SCENE, name, payload, STATUS["DRAFT"])
+        store.write_json(self.ctx.pid, f"scenes/{name}/design.json", payload)
+        return True
+
+    def materialize_all(self) -> int:
+        """把所有已抽出的场景候选都落成资产，返回新建数量。幂等。"""
+        n = 0
+        for c in gacha.list_candidates(self.ctx.pid, "scenes"):
+            name = (c.get("payload") or {}).get("name") or ""
+            if name and self._materialize(name):
+                n += 1
+        return n
+
+    def _group_key(self, name: str) -> str:
+        return f"scene:{name}"
+
     def _draw(self, name: str, base: dict | None = None, n: int = 2,
               hint: str = "", lock: list[str] | None = None) -> list[dict]:
         base = base or {}
         style = self.ctx.style
-        g = f"scene:{name}"
+        g = self._group_key(name)
         start = gacha.next_label_index(self.ctx.pid, "scenes", g)
         items = []
         for i in range(n):

@@ -13,10 +13,24 @@ KIND_SCENE = "scene"
 KIND_PROP = "prop"
 
 
+def get_by_name(project_id: str, kind: str, name: str) -> dict | None:
+    """按「项目 + 类型 + 名字」取实体。
+
+    资产是按名字幂等的（同一角色重复生成只升版本号），所以判断「这个资产建过没有」
+    要按名字查，不能按 id。
+    """
+    r = db.one("SELECT * FROM entities WHERE project_id=? AND kind=? AND name=?",
+               (project_id, kind, name))
+    if not r:
+        return None
+    d = dict(r)
+    d["payload"] = db.loads(r["payload"], {})
+    return d
+
+
 def upsert(project_id: str, kind: str, name: str, payload: dict[str, Any],
            status: str = "DRAFT") -> dict:
-    exist = db.one("SELECT * FROM entities WHERE project_id=? AND kind=? AND name=?",
-                   (project_id, kind, name))
+    exist = get_by_name(project_id, kind, name)
     if exist:
         version = int(exist["version"] or 1) + 1
         db.run("UPDATE entities SET payload=?, status=?, version=?, updated_at=? WHERE id=?",

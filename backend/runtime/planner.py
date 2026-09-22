@@ -29,6 +29,13 @@ def build_plan(mirror: str = "cn", model_key: str | None = None,
 
     m = catalog.MIRRORS.get(mirror) or catalog.MIRRORS["cn"]
     model_key = model_key or tier["model"]
+    # 未知的模型版本要在这里挡掉：往下走是 catalog.MODEL_REPOS[key]，
+    # 直接 KeyError 的话用户看到的是 500 + 一坨 traceback，而不是「你写错了」。
+    if model_key and model_key not in catalog.MODEL_REPOS:
+        raise ValueError(
+            f"没有这个模型版本：{model_key}。可选："
+            + "、".join(f"{k}（{v['name']}）" for k, v in catalog.MODEL_REPOS.items())
+        )
     if include_nodes is None:
         include_nodes = bool(tier["nodes"])
 

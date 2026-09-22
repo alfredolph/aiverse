@@ -1216,7 +1216,6 @@ const ACTIONS = {
 
   // ---- 音色 ----
   async 'set-voice'(el) {
-    await api.patch(`/api/projects/${S.pid}/entities/${'x'}`, {}).catch(() => { });
     const kind = 'character';
     const list = (await api.get(`/api/projects/${S.pid}/entities?kind=${kind}`)).entities || [];
     const e = list.find((x) => x.name === el.dataset.char);

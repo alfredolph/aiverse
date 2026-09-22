@@ -39,6 +39,45 @@ def route(method: str, pattern: str):
     return deco
 
 
+def _comfy_listen_pid(port: int = 8188) -> int | None:
+    """反查监听指定端口的进程 PID。查不到返回 None。
+
+    用 `netstat -ano -p TCP` 而不是记 PID 文件：ComfyUI 会自己再 fork 子进程，
+    启动时拿到的那个 PID 未必是最终持着端口的那个；按端口查永远拿到真的那个。
+    """
+    import subprocess
+    try:
+        r = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                           capture_output=True, text=True, timeout=15,
+                           encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        # 形如：TCP  127.0.0.1:8188  0.0.0.0:0  LISTENING  12345
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        if not parts[1].endswith(f":{port}") or parts[3].upper() != "LISTENING":
+            continue
+        try:
+            return int(parts[4])
+        except ValueError:
+            continue
+    return None
+
+
+def _is_python_pid(pid: int) -> bool:
+    """确认这个 PID 的进程名是 python 系（python.exe / pythonw.exe）。"""
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=15,
+                           encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return "python" in (r.stdout or "").lower()
+
+
 class Api:
     """所有接口实现。每个方法返回 (status, payload)。"""
 
@@ -199,9 +238,15 @@ class Api:
         key = m["key"]
         from .agents import CharacterAgent, SceneAgent, StoryboardAgent, VideoAgent
         if key == "characters":
-            return 200, CharacterAgent(c).approve_all()
+            a = CharacterAgent(c)
+            # 先兜底资产化：老项目（这个修复之前跑的）只有候选没有实体，
+            # 直接点「全部通过」会通过 0 条。materialize_all 是幂等的。
+            a.materialize_all()
+            return 200, a.approve_all()
         if key == "scenes":
-            return 200, SceneAgent(c).approve_all()
+            a = SceneAgent(c)
+            a.materialize_all()
+            return 200, a.approve_all()
         if key == "storyboard":
             return 200, StoryboardAgent(c).approve_all()
         if key == "video":
@@ -359,11 +404,15 @@ class Api:
     @route("POST", r"/api/runtime/install")
     def runtime_install(self, m, body, q):
         from .runtime.installer import installer
-        return 200, installer().start(
-            mirror=body.get("mirror") or "cn",
-            model_key=body.get("model"),
-            include_nodes=body.get("nodes"),
-        )
+        try:
+            return 200, installer().start(
+                mirror=body.get("mirror") or "cn",
+                model_key=body.get("model"),
+                include_nodes=body.get("nodes"),
+            )
+        except ValueError as e:
+            # 参数写错（比如不存在的模型版本）是 400，不是 500
+            return 400, {"error": str(e)}
 
     @route("POST", r"/api/runtime/cancel")
     def runtime_cancel(self, m, body, q):
@@ -454,6 +503,12 @@ class Api:
         venv_py = rt / "venv" / "Scripts" / "python.exe"
         if not main_py.exists() or not venv_py.exists():
             return 400, {"error": "ComfyUI 尚未部署，请先在「环境部署」里一键安装"}
+        running = _comfy_listen_pid()
+        if running:
+            # 重复点「启动」不该再起一个 —— 第二个实例会抢不到端口然后静默退出，
+            # 用户看到的是「启动了但没反应」。
+            return 200, {"ok": True, "url": "http://127.0.0.1:8188", "pid": running,
+                         "message": "ComfyUI 已经在运行了"}
         try:
             subprocess.Popen(
                 [str(venv_py), str(main_py), "--listen", "127.0.0.1", "--port", "8188"],
@@ -467,15 +522,30 @@ class Api:
 
     @route("POST", r"/api/runtime/comfy/stop")
     def runtime_comfy_stop(self, m, body, q):
+        """停掉本机 8188 上的 ComfyUI。
+
+        早先这里是 `taskkill /F /IM python.exe /FI "WINDOWTITLE eq *runtime*"`：
+        按「窗口标题里含 runtime」去杀 python.exe —— 用户自己开着的 Jupyter、
+        别的 python 脚本，只要窗口标题沾上这两个字就一起没了。
+        改成按端口反查 PID：只杀真正监听 8188 的那个进程，而且额外核对镜像名，
+        确认它确实是 python.exe 才动手。
+        """
         import subprocess
-        from .core.config import RUNTIME_DIR
+        pid = _comfy_listen_pid()
+        if not pid:
+            return 200, {"ok": True, "stopped": False,
+                         "message": "没有发现监听 8188 的进程，ComfyUI 应该已经停了"}
+        if not _is_python_pid(pid):
+            return 200, {"ok": False, "stopped": False,
+                         "message": f"8188 被 PID {pid} 占着，但它不是 python.exe，"
+                                    f"不敢动它（可能是别的软件）"}
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "python.exe", "/FI",
-                            f"WINDOWTITLE eq *{RUNTIME_DIR.name}*"],
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                            capture_output=True, timeout=15)
-        except Exception:
-            pass
-        return 200, {"ok": True, "message": "已发送停止指令"}
+        except Exception as e:
+            return 200, {"ok": False, "stopped": False, "message": f"停止失败：{e}"}
+        return 200, {"ok": True, "stopped": True, "pid": pid,
+                     "message": f"已停止 ComfyUI（PID {pid}）"}
 
     # ------------------------------------------------------------ 工作流
     @route("GET", r"/api/projects/(?P<pid>[\w\-]+)/workflow")
