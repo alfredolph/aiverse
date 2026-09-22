@@ -128,7 +128,11 @@ jobs:
       - name: Build AIVerse.exe（含内置 FFmpeg）
         run: python build_exe.py
 
-      - name: Smoke test（后端 API + 前端渲染）
+      # 「FFmpeg 随程序自带」这条承诺必须**对着产物本身**验，不能只看打包日志。
+      # build_exe.py 在 fetch_ffmpeg.py 失败时只打一行警告、照样出包 ——
+      # 那样打出来的是一个「说好自带 FFmpeg、其实没有」的 exe：
+      # 界面一切正常，用户点到导出才发现渲染不了。所以这里直接问那个 exe。
+      - name: Smoke test（后端 API + 前端渲染 + 内置 FFmpeg）
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist/AIVerse.exe -ArgumentList '--no-open','8799' -PassThru
@@ -140,6 +144,18 @@ jobs:
             Write-Host "runtime/status -> $($s.StatusCode)"
             $pl = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/runtime/plan?mirror=cn' -UseBasicParsing -TimeoutSec 30
             Write-Host "runtime/plan -> $($pl.StatusCode)"
+
+            # 关键断言：exe 自己必须说「我有 FFmpeg，而且是自带的那份」
+            $m = Invoke-RestMethod -Uri 'http://127.0.0.1:8799/api/meta' -TimeoutSec 15
+            Write-Host "meta.ffmpeg -> available=$($m.ffmpeg.available) bundled=$($m.ffmpeg.bundled)"
+            Write-Host "            -> $($m.ffmpeg.path)"
+            if (-not $m.ffmpeg.available) {
+              throw "打出来的 exe 里没有可用的 FFmpeg（hint: $($m.ffmpeg.hint)）。多半是上一步 fetch_ffmpeg.py 没抓到，去翻它的日志。"
+            }
+            if (-not $m.ffmpeg.bundled) {
+              Write-Host "::warning title=FFmpeg 不是自带的::exe 找到了 FFmpeg，但用的是系统 PATH 里的那份（$($m.ffmpeg.path)），不是打进包里的"
+            }
+
             node tools/ui_smoke.js http://127.0.0.1:8799
             if ($LASTEXITCODE -ne 0) { throw "前端渲染冒烟测试失败" }
           } finally {
