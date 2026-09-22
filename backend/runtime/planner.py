@@ -45,12 +45,16 @@ def build_plan(mirror: str = "cn", model_key: str | None = None,
 
     def step(key: str, name: str, desc: str, kind: str, size_gb: float,
              cmd: list[str] | None = None, optional: bool = False,
-             needs_gpu: bool = False, cwd: str | None = None) -> None:
+             needs_gpu: bool = False, cwd: str | None = None,
+             marker: str = "") -> None:
         steps.append({
             "key": key, "name": name, "desc": desc, "kind": kind,
             "size_gb": round(size_gb, 3), "size_human": _size_human(size_gb),
             "cmd": cmd or [], "optional": optional, "needs_gpu": needs_gpu,
             "cwd": cwd or str(rt), "done": False,
+            # marker：这一步跑完后写下的「完工标记」文件（相对 RUNTIME_DIR）。
+            # 幂等判断用它，而不是去猜某个包有没有装上 —— 猜错的代价是每次重跑都重装。
+            "marker": marker,
         })
 
     # ---- 1. uv -----------------------------------------------------
@@ -87,27 +91,40 @@ def build_plan(mirror: str = "cn", model_key: str | None = None,
          "exec", torch_size, cmd=torch_cmd, needs_gpu=True)
 
     # ---- 5. ComfyUI ------------------------------------------------
+    # 直接装源码：comfy-cli 的 install 只认 --skip-manager，
+    # --nvidia / --yes / install --workspace 这几个写法官方文档里没有，
+    # 赌它不如自己下 zip + 装 requirements.txt，每一步都能核对。
     step("comfyui", "部署 ComfyUI 执行引擎",
-         "底层推理后端。界面上完全看不到节点，只作为 H3 的运行时",
-         "exec", 1.2,
+         "底层推理后端（源码包）。界面上完全看不到节点，只作为 H3 的运行时",
+         "download_zip", 0.04)
+    step("comfyui-deps", "安装 ComfyUI 运行依赖",
+         "前端包 / aiohttp / transformers 等，含官方 H3 工作流模板",
+         "install_reqs", 1.2,
          cmd=[str(rt / "uv" / "uv.exe"), "pip", "install", "--python", str(rt / "venv"),
-              "comfy-cli"])
-    step("comfyui-install", "初始化 ComfyUI 与基础依赖",
-         "拉取 ComfyUI 本体并安装其依赖",
-         "exec", 1.2,
-         cmd=[str(rt / "venv" / "Scripts" / "comfy.exe"), "install", "--skip-manager",
-              "--nvidia", "--workspace", str(rt / "comfyui"), "--yes"])
+              "-r", str(rt / "comfyui" / "requirements.txt")],
+         marker="comfyui/.aiverse-deps-ok")
 
     # ---- 6. 加速节点（可选）----------------------------------------
     if include_nodes:
-        step("comfy-nodes", "安装 H3 加速节点",
-             "SageAttention + EasyCache，官方实测 15 秒视频 8 分钟 → 约 4 分钟",
-             "exec", 0.35,
-             cmd=[str(rt / "venv" / "Scripts" / "comfy.exe"), "node", "install",
-                  "https://github.com/kijai/ComfyUI-KJNodes"],
-             optional=True, needs_gpu=True)
+        step("comfy-nodes", "安装 H3 加速节点（KJNodes）",
+             "提供 H3 专用采样加速与显存优化节点。装完在 ComfyUI 里可搜到 "
+             "「MiniMax H3」加速节点；SageAttention 需按 torch/CUDA 版本另装 wheel",
+             "download_zip", 0.02, optional=True, needs_gpu=True)
+        steps[-1]["unzip_to"] = str(rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes")
+        step("comfy-nodes-deps", "安装加速节点依赖",
+             "KJNodes 的 requirements（没有就跳过）",
+             "install_reqs", 0.1,
+             cmd=[str(rt / "uv" / "uv.exe"), "pip", "install", "--python", str(rt / "venv"),
+                  "-r", str(rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes"
+                            / "requirements.txt")],
+             optional=True, needs_gpu=True,
+             marker="comfyui/custom_nodes/ComfyUI-KJNodes/.aiverse-deps-ok")
 
     # ---- 7. H3 权重 ------------------------------------------------
+    # 落到 comfyui/models/：Comfy-Org 的仓库目录结构（diffusion_models /
+    # text_encoders / vae / loras）跟 ComfyUI 的 models/ 一一对应，
+    # 所以 local_dir 指到 comfyui/models，文件就会自动落到正确位置。
+    models_dir = rt / "comfyui" / "models"
     if model_key:
         md = catalog.MODEL_REPOS[model_key]
         repo = md["repo_modelscope"] if m["models"] == "modelscope" else md["repo_hf"]
@@ -118,11 +135,13 @@ def build_plan(mirror: str = "cn", model_key: str | None = None,
              cmd=[str(rt / "uv" / "uv.exe"), "pip", "install", "--python", str(rt / "venv"),
                   "modelscope", "huggingface_hub"])
         step("h3-weights", f"下载 {md['name']}",
-             f"{md['desc']} 仓库：{repo}",
+             f"{md['desc']} 共 {len(md['files'])} 个文件，来自 {repo}",
              "model_download", md["size_gb"],
-             cmd=["--repo", repo, "--subdir", md["subdir"],
-                  "--backend", m["models"], "--target", str(rt / "models" / "MiniMax-H3")],
              needs_gpu=True)
+        steps[-1]["repo"] = repo
+        steps[-1]["files"] = list(md["files"])
+        steps[-1]["backend"] = m["models"]
+        steps[-1]["target"] = str(models_dir)
         if md["min_vram"] > vram > 0:
             warnings.append(
                 f"当前显存 {vram:.0f}GB 低于该版本的推荐值 {md['min_vram']}GB，"

@@ -218,11 +218,20 @@ class H3ComfyUIProvider(VideoProvider):
             obj = self._api("/object_info", timeout=25)
             from .h3_workflows import h3_available
             info = h3_available(obj)
+            comfy_ver = str((stats.get("system") or {}).get("comfyui_version") or "")
             if not info["available"]:
-                return {"ok": False, "connected": True,
-                        "detail": "ComfyUI 已连接，但未检测到 H3 节点。请先安装 MiniMax H3 节点包",
-                        "comfyui": stats.get("system", {})}
+                return {"ok": False, "connected": True, "core_node": None,
+                        "detail": "ComfyUI 已连接，但没找到 H3 的生成节点"
+                                  "（需要 ComfyUI ≥ 0.30.0，H3 是原生支持的）。"
+                                  "如果你用的是旧版，请先升级 ComfyUI 再点「检测 H3 环境」",
+                        "comfyui_version": comfy_ver,
+                        "related_nodes": info["related_nodes"]}
             return {"ok": True, "connected": True, "detail": "H3 节点就绪",
+                    "core_node": info["core_node"],
+                    "ref_core_node": info.get("ref_core_node"),
+                    "reference_capable": info.get("reference_capable"),
+                    "comfyui_version": comfy_ver,
+                    "comfyui_nodes": info["comfyui_nodes"],
                     "acceleration": info["acceleration"],
                     "related_nodes": info["related_nodes"]}
         except Exception as e:
@@ -286,30 +295,42 @@ class H3ComfyUIProvider(VideoProvider):
         if not self.base_url:
             raise RuntimeError("H3 Adapter 未配置 ComfyUI 地址")
 
-        from .h3_workflows import build_graph
+        from .h3_workflows import build_graph, detect_model_files, reconcile_graph
+        from ..core.config import RUNTIME_DIR
 
         # 1) 健康检查（ComfyUI 没开就先自动拉起）+ 节点映射
         if not self.ensure_ready():
             h = self.health()
             raise RuntimeError(h.get("detail") or "H3 未就绪：ComfyUI 未运行且无法自动启动")
         nm = self.node_map()
+        object_info = self._api("/object_info", timeout=25)
 
-        # 2) 尺寸：H3-Base 原生 768p 级，按画幅换算
+        # 2) 权重文件名：优先用部署时记下来的，没有就现场扫 ComfyUI 的 models/
+        mf = dict(self.meta.get("model_files") or {})
+        if not mf:
+            model_dir = Path(self.meta.get("model_dir") or (RUNTIME_DIR / "comfyui" / "models"))
+            mf = detect_model_files(model_dir)
+        if not mf.get("unet_fl2va") and not mf.get("unet_ref2va"):
+            raise RuntimeError(
+                "没有找到 H3 权重文件。请先在「⚡ 环境部署」里完成权重下载"
+                "（ComfyUI/models/diffusion_models 下应有 minimax_h3_*.safetensors）"
+            )
+
+        # 3) 尺寸：H3 原生 768p 级；帧数必须落在 17k+5 栅格上
         w, hh = _h3_size(aspect, resolution)
         fps = int(self.meta.get("fps") or 24)
-        frames = max(25, int(round(seconds * fps / 4)) * 4 + 1)   # 视频模型常见的 4n+1
+        use_lora = bool(self.meta.get("use_lora", True))
 
         params = {
             "prompt": prompt,
-            "negative": (self.meta.get("negative")
-                         or "blurry, low quality, deformed, watermark, text"),
-            "width": w, "height": hh, "frames": frames, "fps": fps,
-            "steps": int(self.meta.get("steps") or 50),
-            "cfg": float(self.meta.get("cfg") or 6.0),
+            "width": w, "height": hh, "fps": fps,
+            "seconds": seconds,
+            # 不写死步数：带 Turbo LoRA 时由 build_graph 按 LoRA 的「几步版」决定
+            # （仓库里 4step / 8step 两个版本的文件名里就写着步数），不带 LoRA 则 20 步
+            "steps": int(self.meta.get("steps") or 0),
             "seed": int(seed if seed is not None else _seed_of(prompt) % 2 ** 31),
-            "precision": self.meta.get("precision") or "quantized",
-            "offload": bool(self.meta.get("offload", True)),
-            "model_name": self.meta.get("model_name") or "MiniMax-H3",
+            "model_files": mf,
+            "use_lora": use_lora,
             "filename_prefix": "aiverse/h3",
         }
         kind = "ref2va" if reference else "fl2va"
@@ -318,7 +339,30 @@ class H3ComfyUIProvider(VideoProvider):
 
         graph = build_graph(kind, params, nm)
 
-        # 3) 提交
+        # 4) 提交前按 ComfyUI 的真实节点定义校正一遍：
+        #    多一个对方不认识的输入名，ComfyUI 会直接拒单。
+        #    更要紧的是反过来 —— 输入被删掉时 ComfyUI 照样出片，只是出的不是你想要的
+        #    （参考图/首尾帧失效）。所以 silent_risk 非空也当失败处理，宁可报错不糊弄。
+        report = reconcile_graph(graph, object_info)
+        if report["silent_risk"]:
+            raise RuntimeError(
+                "当前 ComfyUI 的 H3 节点认不出这些输入："
+                + "、".join(report["silent_risk"][:6])
+                + "。继续提交会生成一个「少了参考图/首尾帧」的视频，所以先停下。"
+                "请把 ComfyUI 升到 ≥ 0.30.0，或在「环境部署 → 检测 H3 环境」里重新识别节点"
+            )
+        if not report["ok"]:
+            raise RuntimeError(
+                "当前 ComfyUI 跑不了 H3："
+                + (f"缺少节点 {'、'.join(report['missing_class'])}；"
+                   if report["missing_class"] else "")
+                + (f"缺少必需输入 {'、'.join(report['missing_required'][:6])}；"
+                   if report["missing_required"] else "")
+                + "请确认 ComfyUI 版本 ≥ 0.30.0（H3 是原生支持的），"
+                  "或在「环境部署」里点「检测 H3 环境」重新识别节点"
+            )
+
+        # 5) 提交
         try:
             resp = self._api("/prompt", {"prompt": graph, "client_id": "aiverse"})
         except Exception as e:
@@ -327,7 +371,7 @@ class H3ComfyUIProvider(VideoProvider):
         if not prompt_id:
             raise RuntimeError(f"ComfyUI 未返回 prompt_id：{str(resp)[:300]}")
 
-        # 4) 轮询
+        # 6) 轮询
         deadline = time.time() + int(self.meta.get("timeout_seconds") or 3600)
         while time.time() < deadline:
             time.sleep(2.5)
@@ -345,20 +389,27 @@ class H3ComfyUIProvider(VideoProvider):
             outputs = entry.get("outputs") or {}
             files = _collect_video_outputs(outputs)
             if files:
-                # 5) 取回文件
+                # 7) 取回文件
                 local = self._download(files[0], prompt_id)
                 return {
                     "path": str(local), "video_path": str(local),
                     "seed": params["seed"],
                     "manifest": {
                         "prompt": prompt, "reference": reference, "seconds": seconds,
-                        "resolution": f"{w}x{hh}", "aspect": aspect, "frames": frames,
-                        "fps": fps, "steps": params["steps"], "seed": params["seed"],
+                        "resolution": f"{w}x{hh}", "aspect": aspect,
+                        "frames": graph["6"]["inputs"]["length"], "fps": fps,
+                        # 步数可能被 build_graph 按 LoRA 的「几步版」改过，从图里读真值
+                        "steps": graph["8"]["inputs"]["steps"], "seed": params["seed"],
+                        "used_lora": bool(graph.get("5")),
+                        "lora_name": (graph.get("5") or {}).get("inputs", {}).get("lora_name"),
+                        "core_node": graph["6"]["class_type"],
                         "provider": self.name, "backend": "comfyui",
                         "prompt_id": prompt_id, "variant": kind,
-                        "node_map": nm,
+                        "node_map": nm, "model_files": mf,
+                        "dropped_inputs": report["dropped"],
                         "status": "rendered",
-                        "note": "由本地 ComfyUI + MiniMax H3 生成（原生 768p，含音频轨）",
+                        "note": "由本地 ComfyUI + MiniMax H3 生成"
+                                "（原生 768p 级，自带音频轨）",
                     },
                 }
         raise RuntimeError("H3 生成超时")

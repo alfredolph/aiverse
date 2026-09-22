@@ -311,8 +311,8 @@ def main() -> int:
 
     print("\n[断言 1/5] 返回体不是空壳，错误路径给的是人话不是 traceback")
     _, health = call("GET", "/api/health")
-    check(health.get("version") == "1.0.3",
-          "版本 1.0.3", f"/api/health 版本应为 1.0.3，实际 {health.get('version')}")
+    check(health.get("version") == "1.0.4",
+          "版本 1.0.4", f"/api/health 版本应为 1.0.4，实际 {health.get('version')}")
     _, shots_d = call("GET", f"/api/projects/{demo['id']}/shots")
     check(bool((shots_d or {}).get("shots")), "示例项目有分镜", "示例项目应有分镜")
     _, st = call("GET", f"/api/projects/{demo['id']}/stages")

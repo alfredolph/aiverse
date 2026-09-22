@@ -65,7 +65,7 @@ def main() -> int:
     print("  绿色版：数据与 30GB 推理运行时放在 exe 同级，可随 U 盘带走。")
     print("  安装版（iscc installer\\aiverse.iss）：统一放到 %LOCALAPPDATA%\\AIVerse，重装不丢模型。")
     print("\n  关于体积：本 exe 是「编排大脑 + 一键部署器」，约 10 MB。")
-    print("  真正的算力是 MiniMax H3（33B 参数 / 量化权重 26.4 GB），物理上无法打进 exe，")
+    print("  真正的算力是 MiniMax H3（33B 参数 / 精简版权重 39 GB 起），物理上无法打进 exe，")
     print("  由首次运行时的「⚡ 环境部署」自动安装，或走「离线包导入」零下载复制。")
     print("\n  想跑前端渲染冒烟测试：")
     print("    dist\\AIVerse.exe 8799 --no-open   然后   node tools/ui_smoke.js http://127.0.0.1:8799\n")

@@ -3,7 +3,7 @@
 ;
 ;  前置：先执行  python build_exe.py  生成 dist\AIVerse.exe
 ;  编译：iscc installer\aiverse.iss     （或右键用 Inno Setup Compiler 打开）
-;  产物：installer\Output\AIVerse-Setup-1.0.3.exe
+;  产物：installer\Output\AIVerse-Setup-1.0.4.exe
 ;
 ;  说明：默认安装到 %LOCALAPPDATA%\Programs\AI Studio，
 ;        无需管理员权限，且用户数据目录可写。
@@ -11,7 +11,7 @@
 ;
 ;  关于体积（重要，别改错）：
 ;    本安装包只包含「编排大脑」——剧本/角色/分镜/审核/抽卡/剪辑 + 一键部署器，
-;    约 10 MB。真正出片的算力是 MiniMax H3（33B 参数，量化权重 26.4 GB），
+;    约 10 MB。真正出片的算力是 MiniMax H3（33B 参数，精简版权重 39 GB 起），
 ;    物理上不可能塞进安装包。所以安装完会引导用户点一下「一键部署」，
 ;    自动装好 Python/PyTorch/ComfyUI/H3 权重/FFmpeg；也可以走「离线包导入」，
 ;    在别的机器上零下载复制过去。
@@ -19,7 +19,7 @@
 
 #define MyAppName "AI Studio"
 #define MyAppNameCN "AI 漫剧工厂"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "1.0.4"
 #define MyAppPublisher "AIVerse"
 #define MyAppExeName "AIVerse.exe"
 
@@ -100,7 +100,7 @@ begin
            '关于体积，先说清楚（避免误会）：' + #13#10 +
            '  · 本安装包约 10 MB，它是「编排大脑」——剧本、角色、分镜、' + #13#10 +
            '    审核门、抽卡、局部重生成、剪辑导出，外加一键部署器。' + #13#10 +
-           '  · 真正出片的算力是 MiniMax H3（33B 参数），量化权重 26.4 GB，' + #13#10 +
+           '  · 真正出片的算力是 MiniMax H3（33B 参数），精简版权重 39 GB 起，' + #13#10 +
            '    加 PyTorch/CUDA 共约 30 GB。没有任何软件能把它塞进 10 MB。' + #13#10 + #13#10 +
            '所以下一步请点「一键部署本地推理环境」（桌面或开始菜单里都有），' + #13#10 +
            '它会全自动装好一切；如果你的机器不方便联网，' + #13#10 +

@@ -78,7 +78,7 @@ setTimeout(() => {
     ['导出离线包', '缺少离线导出按钮'],
     ['开始一键部署', '缺少开始部署按钮'],
     ['检测 H3 环境', '缺少 H3 检测按钮'],
-    ['26.4', '缺少 H3 体积说明'],
+    ['39', '缺少 H3 体积说明'],
     ['pbar', '缺少进度条'],
   ];
   for (const [needle, msg] of checks) need(html.includes(needle), `${msg}：未找到「${needle}」`);

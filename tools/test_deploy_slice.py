@@ -5,14 +5,21 @@
     计划 → 逐步执行 → 下载 → 解压 → 落地 → 状态持久化 → 失败重试 → 幂等跳过
 这条路在开发机上从来没真跑过，因为完整计划要下 30 GB。
 
-这里挑计划里体积最小的两个 `download_zip` 步骤真跑（uv 17 MB + FFmpeg 92 MB）：
+这里挑计划里体积较小的 `download_zip` 步骤真跑（uv 17 MB + FFmpeg 92 MB）：
     _run() 全程 → 两个 exe 真执行 → state.json 内容 → status() → 幂等重跑
 
-torch / comfyui / H3 权重那几步要 N 卡加几十 GB，不在本测试范围内。
+`--with-comfyui` 会再加两步：ComfyUI 源码包（约 30 MB）与 KJNodes（约 5 MB）。
+为什么专门测它俩：ComfyUI 以前是用 comfy-cli 装的，而它的 `install` 其实只认
+`--skip-manager`，`--nvidia` / `--yes` / `install --workspace` 这几个写法官方文档里
+都没有，`node install <github-url>` 也无效（要的是 Registry ID）—— 也就是说那一步
+大概率一跑就挂。改成直接下源码 zip 之后，落点对不对必须有个测试盯着。
+
+torch / H3 权重那几步要 N 卡加几十 GB，不在本测试范围内。
 
 用法：
     python tools/test_deploy_slice.py                # 含 FFmpeg（约 110 MB）
     python tools/test_deploy_slice.py --skip-ffmpeg  # 只跑 uv（约 17 MB）
+    python tools/test_deploy_slice.py --with-comfyui # 再加 ComfyUI + KJNodes（约 145 MB）
 
 注意：脚本会自己起一个子进程、把 AIVERSE_RUNTIME 指到临时目录再跑，
 绝不会碰你本机已经部署好的 runtime/。
@@ -35,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 MARKER = "--in-child"
 
 
-def run_child(tmp: str, skip_ffmpeg: bool) -> int:
+def run_child(tmp: str, skip_ffmpeg: bool, with_comfyui: bool) -> int:
     """子进程里跑真正的部署，确保 AIVERSE_RUNTIME 在 import 之前就生效。"""
     env = dict(os.environ)
     env["AIVERSE_RUNTIME"] = tmp
@@ -45,12 +52,16 @@ def run_child(tmp: str, skip_ffmpeg: bool) -> int:
            "--runtime", tmp]
     if skip_ffmpeg:
         cmd.append("--skip-ffmpeg")
+    if with_comfyui:
+        cmd.append("--with-comfyui")
     return subprocess.run(cmd, env=env).returncode
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-ffmpeg", action="store_true", help="只跑 uv（约 17 MB）")
+    ap.add_argument("--with-comfyui", action="store_true",
+                    help="再加 ComfyUI 源码包与 KJNodes（约 35 MB）")
     ap.add_argument("--runtime", default="", help=argparse.SUPPRESS)
     ap.add_argument(MARKER, dest="in_child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -60,7 +71,7 @@ def main() -> int:
         tmp = tempfile.mkdtemp(prefix="aiverse_deploy_")
         print(f"\n临时运行时目录：{tmp}")
         print("（不会碰你本机已有的 runtime/）")
-        rc = run_child(tmp, args.skip_ffmpeg)
+        rc = run_child(tmp, args.skip_ffmpeg, args.with_comfyui)
         shutil.rmtree(tmp, ignore_errors=True)
         return rc
 
@@ -84,8 +95,12 @@ def main() -> int:
 
     # ------------------------------------------------------ [1/5] 计划过滤
     print("\n[1/5] 从真实部署计划里挑出 download_zip 步骤")
-    plan = planner.build_plan(mirror="cn")
-    want = {"uv"} if args.skip_ffmpeg else {"uv", "ffmpeg"}
+    plan = planner.build_plan(mirror="cn", include_nodes=args.with_comfyui)
+    want = {"uv"}
+    if not args.skip_ffmpeg:
+        want.add("ffmpeg")
+    if args.with_comfyui:
+        want |= {"comfyui", "kj-nodes"}
     steps = [s for s in plan["steps"] if s["key"] in want]
     got = {s["key"] for s in steps}
     need(got == want, f"计划里应有 {want}，实际 {got}", f"取到步骤：{sorted(got)}")
@@ -135,6 +150,25 @@ def main() -> int:
             need(r.returncode == 0, f"ffmpeg -version 失败：{(r.stderr or '')[:200]}",
                  f"ffmpeg -version → {first[0][:70] if first else '?'}")
 
+    if args.with_comfyui:
+        main_py = rt / "comfyui" / "main.py"
+        need(main_py.exists(), f"应有 {main_py}（源码包解压落点错了？）",
+             f"ComfyUI 本体已就位（{main_py.stat().st_size if main_py.exists() else 0} B）")
+        req = rt / "comfyui" / "requirements.txt"
+        need(req.exists(), f"应有 {req}（comfyui-deps 步骤要用它）",
+             "ComfyUI requirements.txt 已就位")
+        if req.exists():
+            txt = req.read_text(encoding="utf-8", errors="replace")
+            need("comfyui-frontend-package" in txt,
+                 "requirements.txt 里没看到前端包，可能下到了别的分支",
+                 "requirements.txt 含 comfyui-frontend-package（前端界面）")
+        kj = rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes" / "__init__.py"
+        need(kj.exists(), f"应有 {kj}（多剥了一层目录？）",
+             "KJNodes 已落到 custom_nodes/ComfyUI-KJNodes/")
+        need(not list((rt / "comfyui" / "custom_nodes").glob("*-main")),
+             "custom_nodes 下留了 ComfyUI-KJNodes-main 这种带分支名的目录",
+             "custom_nodes 下没有多余的分支名目录（strip_root 正确）")
+
     leftovers = list((rt / "cache").glob("*.zip")) if (rt / "cache").exists() else []
     need(not leftovers, f"cache 里不该留压缩包，实际 {leftovers}",
          "cache 已清理，没留压缩包")
@@ -156,9 +190,11 @@ def main() -> int:
              "state.json 记录了结束时间")
 
     inst = installer().detect_installed()
-    need(inst.get("uv") and (args.skip_ffmpeg or inst.get("ffmpeg")),
+    need(inst.get("uv") and (args.skip_ffmpeg or inst.get("ffmpeg"))
+         and (not args.with_comfyui or inst.get("comfyui")),
          f"detect_installed 应认出已装组件，实际 {inst}",
-         f"detect_installed 认出：uv={inst.get('uv')} ffmpeg={inst.get('ffmpeg')}")
+         f"detect_installed 认出：uv={inst.get('uv')} ffmpeg={inst.get('ffmpeg')} "
+         f"comfyui={inst.get('comfyui')}")
 
     # ------------------------------------------------------ [5/5] 幂等
     print("\n[5/5] 幂等：再跑一遍应该全部跳过，不重复下载")
@@ -182,8 +218,7 @@ def main() -> int:
             print("   · " + f)
         return 1
     print("✓ 部署器本体端到端通过（真实下载 + 解压 + 落地 + 执行 + 状态 + 幂等）")
-    print("  完整计划里的 torch / comfyui / H3 权重需要 N 卡与几十 GB，"
-          "走的是同一套 _run 逻辑。")
+    print("  完整计划里的 torch / H3 权重需要 N 卡与几十 GB，走的是同一套 _run 逻辑。")
     return 0
 
 

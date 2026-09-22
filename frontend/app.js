@@ -224,7 +224,7 @@ function deployBanner() {
       <button class="btn sm primary" data-act="open-runtime">${running ? '查看进度' : '⚡ 一键部署'}</button></div>
     <div class="hint">
       本客户端只负责编排，所以本体很小。真正出片的 <b>MiniMax H3</b> 是 33B 参数模型，
-      量化版权重 <b>26.4 GB</b>，加上 PyTorch/CUDA 约 2.5 GB —— 这部分不可能塞进安装包。
+      精简版权重 <b>39 GB</b> 起，加上 PyTorch/CUDA 约 2.5 GB —— 这部分不可能塞进安装包。
       点「一键部署」，程序会自动装好全部依赖与权重（含 FFmpeg），之后就能用你的显卡本地出片。
       不方便联网的话，也可以用<b>离线包导入</b>，零下载复制。
     </div>
@@ -268,7 +268,7 @@ function renderRuntime() {
           AIVerse 本体只有 <b>9.4 MB</b>，因为它只负责「编排」——
           剧本、角色、分镜、审核、抽卡、剪辑。
           <br/><br/>
-          真正出片的算力在 <b>MiniMax H3</b>：33B 参数、量化版 <b>26.4 GB</b> 权重，
+          真正出片的算力在 <b>MiniMax H3</b>：33B 参数、精简版 <b>39 GB</b> 权重，
           再加 PyTorch/CUDA 约 2.5 GB。这些不可能塞进一个 9 MB 的 exe，
           全球所有 AI 桌面应用（含 ComfyUI Desktop / Pinokio / EZlaunch）都是首次运行下载。
           <br/><br/>
@@ -334,7 +334,7 @@ function renderRuntime() {
               ${check(inst.torch, 'PyTorch + CUDA')}
               ${check(inst.comfyui, 'ComfyUI 执行引擎')}
               ${check(inst.ffmpeg, 'FFmpeg')}
-              ${check(inst.h3_weights, 'MiniMax H3 权重', inst.h3_weights ? '' : '约 26.4 GB')}
+              ${check(inst.h3_weights, 'MiniMax H3 权重', inst.h3_weights ? '' : '约 39 GB 起')}
             </div>
             <div class="hint" style="margin-top:12px">
               运行时目录：<span class="mono">${esc(r.runtime_dir || '')}</span>
@@ -416,6 +416,11 @@ function renderRuntime() {
           <div class="card-h"><h3>H3 环境检测</h3>
             <span class="chip ${h3.ok ? 'ok' : 'bad'}">${h3.ok ? '就绪' : '未就绪'}</span></div>
           <div class="hint">${esc(h3.detail || '')}</div>
+          ${h3.core_node ? `<div style="margin-top:9px">
+            出片节点：<b>${esc(h3.core_node)}</b>
+            · 参考图驱动：<b>${h3.reference_capable
+              ? esc(h3.ref_core_node || '可用') : '不可用（仅首尾帧）'}</b>
+            ${h3.comfyui_version ? `· ComfyUI <b>${esc(h3.comfyui_version)}</b>` : ''}</div>` : ''}
           ${h3.acceleration ? `<div style="margin-top:9px">
             加速节点：SageAttention <b>${h3.acceleration.sage_attention ? '已装' : '未装'}</b> ·
             EasyCache <b>${h3.acceleration.easy_cache ? '已装' : '未装'}</b></div>` : ''}

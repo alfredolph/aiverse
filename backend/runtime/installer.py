@@ -84,7 +84,7 @@ class Installer:
             "torch": _has_package(venv_py, "torch"),
             "comfyui": (rt / "comfyui" / "main.py").exists(),
             "ffmpeg": (rt / "ffmpeg" / "bin" / "ffmpeg.exe").exists(),
-            "h3_weights": _model_ready(rt / "models" / "MiniMax-H3"),
+            "h3_weights": _model_ready(rt / "comfyui" / "models"),
             "comfy_running": _comfy_alive(COMFY_URL),
         }
 
@@ -154,7 +154,7 @@ class Installer:
                 key = s["key"]
                 if self._cancel.is_set():
                     raise Cancelled()
-                if self._already_done(key):
+                if self._already_done(s):
                     self._set_step(key, status="done", percent=100.0, message="已存在，跳过")
                     self._log(f"跳过（已安装）：{s['name']}")
                     continue
@@ -165,6 +165,12 @@ class Installer:
                 t0 = time.time()
 
                 self._execute(s, plan, dl, m, rt)
+
+                if s.get("marker"):
+                    mp = rt / s["marker"]
+                    mp.parent.mkdir(parents=True, exist_ok=True)
+                    mp.write_text(f"done at {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                                  encoding="utf-8")
 
                 self._set_step(key, status="done", percent=100.0,
                                message=f"完成，耗时 {int(time.time() - t0)}s")
@@ -191,20 +197,31 @@ class Installer:
             self._save()
             self._log(f"部署失败：{e}")
 
-    def _already_done(self, key: str) -> bool:
+    def _already_done(self, s: dict) -> bool:
+        """这一步是否已经完成过（幂等判断）。
+
+        带 marker 的步骤（装依赖、装节点）以「完工标记文件」为准 ——
+        比去猜某个包有没有装上可靠，猜错的代价是每次重跑都重装一遍。
+        """
+        key = s["key"]
+        rt = RUNTIME_DIR
+        marker = s.get("marker")
+        if marker and (rt / marker).exists():
+            return True
         inst = self.detect_installed()
         return {
             "uv": inst["uv"],
             "python": inst["python"],
             "venv": inst["python"],
             "torch": inst["torch"],
-            "comfyui": (RUNTIME_DIR / "venv" / "Scripts" / "comfy.exe").exists(),
-            "comfyui-install": inst["comfyui"],
-            "comfy-nodes": False,          # 节点安装幂等交给 comfy-cli
+            "comfyui": (rt / "comfyui" / "main.py").exists(),
+            "comfyui-install": inst["comfyui"],          # 旧 state.json 兼容
+            "comfy-nodes": (rt / "comfyui" / "custom_nodes"
+                            / "ComfyUI-KJNodes" / "__init__.py").exists(),
             "model-tool": False,
             "h3-weights": inst["h3_weights"],
             "ffmpeg": inst["ffmpeg"],
-            "wire": (RUNTIME_DIR / "wired.json").exists(),
+            "wire": (rt / "wired.json").exists(),
         }.get(key, False)
 
     def _execute(self, s: dict, plan: dict, dl: Downloader, m: dict, rt: Path) -> None:
@@ -216,14 +233,17 @@ class Installer:
         elif kind == "exec":
             self._do_exec(s["cmd"], s.get("cwd") or str(rt), s["key"])
 
+        elif kind == "install_reqs":
+            self._do_install_reqs(s["cmd"], s.get("cwd") or str(rt))
+
         elif kind == "model_download":
-            cmd = s["cmd"]
-            args = {cmd[i]: cmd[i + 1] for i in range(0, len(cmd) - 1, 2)}
+            # 早期版本把参数塞进 cmd 里用 `--k v` 解析，结果 subdir 被收下却从没用过，
+            # 用户选「精简版」实际会拖整个原始仓库。现在直接读步骤字段，少一层转手。
             venv_py = rt / "venv" / "Scripts" / "python.exe"
             dl.download_model_repo(
-                repo=args["--repo"], target=Path(args["--target"]),
-                backend=args["--backend"], subdir=args.get("--subdir", ""),
-                venv_python=venv_py, expected_gb=s["size_gb"],
+                repo=s["repo"], target=Path(s["target"]), backend=s["backend"],
+                files=s.get("files") or [], venv_python=venv_py,
+                expected_gb=s["size_gb"],
             )
 
         elif kind == "wire":
@@ -235,12 +255,21 @@ class Installer:
     # ------------------------------------------------------------ 各类型实现
     def _do_download_zip(self, s: dict, m: dict, rt: Path, dl: Downloader) -> None:
         key = s["key"]
-        if key == "uv":
-            dest = rt / "uv" / "uv.exe"
-        elif key == "ffmpeg":
-            dest = rt / "ffmpeg" / "bin" / "ffmpeg.exe"
-        else:
+        # 每个组件的落点 + 判断安装成功的标志文件
+        targets = {
+            "uv": (rt / "uv", rt / "uv" / "uv.exe"),
+            "ffmpeg": (rt / "ffmpeg", rt / "ffmpeg" / "bin" / "ffmpeg.exe"),
+            "comfyui": (rt / "comfyui", rt / "comfyui" / "main.py"),
+            "kj-nodes": (rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes",
+                         rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes" / "__init__.py"),
+        }
+        entry = targets.get(key)
+        if not entry:
             raise RuntimeError(f"未配置下载地址：{key}")
+        unzip_to, dest = entry
+        if s.get("unzip_to"):
+            unzip_to = Path(s["unzip_to"])
+            dest = unzip_to / dest.name
 
         # 同一个组件给多个镜像候选，前一个挂了自动换下一个
         urls = catalog.component_urls(key, m.get("_key") or "cn")
@@ -251,7 +280,7 @@ class Installer:
         for attempt in (1, 2):
             try:
                 dl.fetch(urls, tmp, label=s["name"], expected_gb=s["size_gb"])
-                dl.unzip(tmp, rt / key)
+                dl.unzip(tmp, unzip_to)
                 break
             except CorruptArchive as e:
                 # 压缩包坏了通常是缓存被污染（续传到了垃圾数据）。
@@ -280,6 +309,19 @@ class Installer:
                     shutil.copy2(found, dest)
         if not dest.exists():
             raise RuntimeError(f"{s['name']} 安装后仍未找到 {dest.name}，安装不完整")
+
+    def _do_install_reqs(self, cmd: list[str], cwd: str) -> None:
+        """跑 `uv pip install -r <requirements.txt>`。
+
+        没有 requirements.txt 就跳过 —— KJNodes 之类的节点包不一定带，
+        这不是错误，不该让整个部署失败。
+        """
+        if "-r" in cmd:
+            req = Path(cmd[cmd.index("-r") + 1])
+            if not req.exists():
+                self._log(f"  没有 {req.name}，跳过（该组件不需要额外依赖）")
+                return
+        self._do_exec(cmd, cwd, "install_reqs")
 
     def _do_exec(self, cmd: list[str], cwd: str, key: str) -> None:
         exe = Path(cmd[0])
@@ -311,14 +353,20 @@ class Installer:
     def _do_wire(self, plan: dict, rt: Path, dl: Downloader | None = None) -> None:
         """写入 H3 工作流模板，并把 H3 注册为视频 Provider。"""
         from ..providers import registry
-        from ..providers.h3_workflows import export_templates
+        from ..providers.h3_workflows import detect_model_files, export_templates
 
         wf_dir = rt / "comfyui" / "user" / "default" / "workflows" / "aiverse"
         wf_dir.mkdir(parents=True, exist_ok=True)
         written = export_templates(wf_dir)
         self._log(f"已写入 H3 工作流模板：{', '.join(p.name for p in written)}")
 
-        model_dir = rt / "models" / "MiniMax-H3"
+        # 把「实际下到哪些权重文件」记进 Provider：H3 的图要按文件名去 UNETLoader /
+        # CLIPLoader / VAELoader 里选，名字对不上 ComfyUI 就直接报节点校验失败。
+        models_dir = rt / "comfyui" / "models"
+        found = detect_model_files(models_dir)
+        self._log("识别到权重：" + ("、".join(f"{k}={v}" for k, v in found.items())
+                                   or "（未找到，需先完成权重下载）"))
+
         registry.upsert_builtin("video-h3", {
             "name": "MiniMax H3（本地 ComfyUI）",
             "type": "video",
@@ -327,18 +375,21 @@ class Installer:
             "enabled": True,
             "meta": {
                 "backend": "comfyui",
-                "model_dir": str(model_dir),
+                "model_dir": str(models_dir),
                 "workflow_dir": str(wf_dir),
+                "model_files": found,
                 "variant": plan.get("model") or "",
                 "precision": plan.get("tier", {}).get("precision", ""),
                 "offload": plan.get("tier", {}).get("offload", True),
                 "native_resolution": "768p",
-                "notes": "H3-Base 原生 768p；2K 需官方 API。中文口播较弱，建议走 TTS 后期配音。",
+                "notes": "ComfyUI 原生支持 H3（需 0.30.0+）；原生 768p，含音频轨。"
+                         "中文口播较弱，建议走 TTS 后期配音。",
             },
         })
         (rt / "wired.json").write_text(
-            json.dumps({"wired_at": time.time(), "model": plan.get("model")},
-                       ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps({"wired_at": time.time(), "model": plan.get("model"),
+                        "model_files": found}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
         self._log("H3 已注册为视频 Provider（地址 %s）" % COMFY_URL)
 
     # ------------------------------------------------------------ 离线包
@@ -387,7 +438,7 @@ class Installer:
             "ComfyUI 执行引擎": root / "comfyui" / "main.py",
             "Python 隔离环境": root / "venv" / "pyvenv.cfg",
             "PyTorch + CUDA": root / "venv" / "Lib" / "site-packages" / "torch",
-            "MiniMax H3 权重": root / "models" / "MiniMax-H3",
+            "MiniMax H3 权重": root / "comfyui" / "models" / "diffusion_models",
             "FFmpeg": root / "ffmpeg" / "bin" / "ffmpeg.exe",
         }
         found = [k for k, p in checks.items() if p.exists()]
@@ -559,11 +610,23 @@ def invalidate_cache() -> None:
         _CACHE.clear()
 
 
-def _model_ready(model_dir: Path) -> bool:
-    """权重是否已就位：存在且大于 5GB（避免只下了配置文件就判定完成）。"""
-    if not model_dir.exists():
+def _model_ready(models_dir: Path) -> bool:
+    """H3 权重是否就位。
+
+    判据：ComfyUI 的 models/diffusion_models 下有一个 >1GB 的 safetensors。
+    为什么不看总目录体积：ComfyUI 的 models/ 里还有它自带的其它模型，
+    算总量会把「别人的文件」算成自己的进度。
+    """
+    dm = models_dir / "diffusion_models"
+    if not dm.exists():
         return False
-    return _dir_size(model_dir) > 5 * 1024 ** 3
+    for f in dm.glob("*.safetensors"):
+        try:
+            if f.stat().st_size > 1024 ** 3:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _comfy_alive(url: str) -> bool:

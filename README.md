@@ -38,9 +38,9 @@
 | **一键部署器**（自动装下面这一堆） | 同上 | 同上 |
 | Python 隔离环境 + PyTorch + CUDA | 约 2.5 GB | 首次部署时自动装 |
 | ComfyUI 执行引擎 | 约 2.4 GB | 首次部署时自动装 |
-| **MiniMax H3 权重（33B 参数，量化版）** | **26.4 GB** | 首次部署时自动下 |
+| **MiniMax H3 权重（33B 参数，精简版）** | **39 GB 起** | 首次部署时自动下 |
 
-**H3 是一个 33B 参数的全模态视频模型，量化权重 26.4 GB（BF16 版 50+ GB）。**
+**H3 是一个 33B 参数的全模态视频模型，精简版权重 39 GB 起（全精度版 93 GB）。**
 没有任何办法把它压进一个 10 MB 的 exe —— 这不是取舍问题，是物理问题。
 ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是「小安装包 + 首次运行下载」这条路。
 
@@ -69,7 +69,7 @@ ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是�
 
 ### 方式 B：安装包（含开始菜单 / 卸载）
 
-下载 `AIVerse-Setup-1.0.3.exe` 运行安装向导。默认装到
+下载 `AIVerse-Setup-1.0.4.exe` 运行安装向导。默认装到
 `%LOCALAPPDATA%\Programs\AI Studio`，**无需管理员权限**；卸载时不会删除你的项目数据
 **也不会删除已下载的 30 GB 运行时**（重装后可直接复用）。
 
@@ -115,23 +115,81 @@ python run.py --host 0.0.0.0  # 开放局域网（手机控制）
 
 ```
 硬件检测 → uv 运行时管理器 → Python 3.12 隔离环境 → 创建 venv
-        → PyTorch + CUDA → ComfyUI → ComfyUI 依赖 → H3 加速节点
-        → 下载 H3 权重 → FFmpeg → 写工作流 + 注册 Provider
+        → PyTorch + CUDA → ComfyUI 源码包 → ComfyUI 依赖
+        → H3 加速节点（KJNodes，可选）→ 下载 H3 权重 → FFmpeg → 写工作流 + 注册 Provider
 ```
 
-要点：
+每一步都是真动作，没有占位进度条：
 
-- **镜像可选**：国内（ModelScope / 清华源 / 上海交大 torch 源）或海外（HuggingFace）。国内线路下 26.4 GB 大约快 3~10 倍
+| 步骤 | 实际执行的东西 |
+|---|---|
+| uv / FFmpeg / ComfyUI / KJNodes | 从 GitHub 下 zip（国内走 ghproxy 镜像）→ 校验字节数 → 解压到 `runtime/` 下对应位置 |
+| Python / venv / 依赖 | `uv python install 3.12`、`uv venv`、`uv pip install -r requirements.txt` |
+| PyTorch | `uv pip install torch torchvision torchaudio --index-url <镜像>` |
+| H3 权重 | 调 `modelscope.snapshot_download` / `huggingface_hub.snapshot_download`，**按文件白名单**下载 |
+
+**权重下载是"按文件"的，不是整仓库。** 这一点是踩过坑才改的：早先代码里有个 `subdir`
+参数收下了却从没用过，用户选「精简版 39 GB」实际会把整个原始仓库（354 GB）拖下来 ——
+进度条一路走，用户以为一切正常。现在每一步都带明确的文件清单，下完还会核对体积，
+不够 90% 就直接报错并保留断点。
+
+权重来源是 **`Comfy-Org/MiniMax-H3`**（ComfyUI 官方为它重新打包的单文件版，
+HF 与 ModelScope 同名同结构），目录结构与 ComfyUI 的 `models/` 一一对应，
+所以直接下进 `runtime/comfyui/models/`，ComfyUI 立刻就能认：
+
+| 档位 | 内容 | 下载量 | 建议显存 |
+|---|---|---|---|
+| **H3 精简版** | FL2VA 主模型 + Qwen3-VL 文本编码器 + 视频/音频 VAE + 4 步 Turbo LoRA | **39.1 GB** | 8 GB 起 |
+| **H3 全能版** | 再加一套 Ref2VA 主模型（参考生视频，最多 9 图 / 3 视频 / 3 音频） | **60.5 GB** | 12 GB 起 |
+| **H3 全精度版** | 主模型与文本编码器都是 BF16 原精度 | **92.7 GB** | 24 GB 起 |
+
+其他要点：
+
+- **镜像可选**：国内（ModelScope / 清华源 / 上海交大 torch 源）或海外（HuggingFace）。国内线路下 39 GB 大约快 3~10 倍
 - **断点续传**：HTTP Range 续传 + 多镜像自动回退；关掉程序再打开，已下载的部分不重来
 - **续传必须校验**：`.part` 旁边会留一份 `.part.meta` 记录「来源 URL + 远端总大小」。
   对不上就丢弃重下，字节数不足就**不改名**、保留断点。
-  这一段是刻意做重的：26 GB 的模型如果拼进了坏数据，会在解压或加载时才报错，
+  这一段是刻意做重的：39 GB 的模型如果拼进了坏数据，会在解压或加载时才报错，
   用户已经白等几个小时。宁可多下一次，也不让用户拿到坏安装。
-- **幂等**：已装好的步骤自动跳过；失败可单步重试
+- **幂等**：已装好的步骤自动跳过（依赖类步骤以「完工标记文件」为准，不靠猜包名）；失败可单步重试
 - **可取消**：随时中止，已下载文件保留
 - **不污染系统**：所有东西都进 `runtime/`，不动注册表、不改 PATH、不装全局 Python 包
-- **自动识别节点**：连上 ComfyUI 后读 `/object_info`，自动把 H3 节点类名映射进工作流；识别结果持久化，重启仍生效
+- **自动识别节点与权重**：连上 ComfyUI 后读 `/object_info` 自动映射节点类名，扫 `models/` 自动认出
+  用的是哪个精度版本的权重；提交任务前还会拿 `/object_info` 把工作流校验一遍
 - **没 N 卡也能用**：自动降级为「只装 FFmpeg」，生成走云端 Provider，导出照常出片
+
+### 这一版是「对着源头逐条核过」的
+
+v1.0.4 之后，下面这些不再凭印象，全部对得上原始出处：
+
+| 项目 | 核对方式 |
+|---|---|
+| 12 个权重文件名 | HuggingFace API 列出 `Comfy-Org/MiniMax-H3` 的全部文件，逐个比对 |
+| 39.1 / 60.5 / 92.7 GB | 用 API 返回的**真实字节数**相加，不是估的 |
+| 「原始仓库 354 GB」 | `MiniMaxAI/MiniMax-H3` 的 `usedStorage` = 354,023,395,693 字节 |
+| 节点类名与输入名 | ComfyUI 源码 `comfy_extras/nodes_minimax_h3.py` 的 `io.Schema` |
+| 工作流拓扑 | 官方模板 `Comfy-Org/workflow_templates` 的 `video_minimax_h3_i2v.json` |
+| 帧数栅格 | 该节点 `length` 的 `min=5 / max=3600 / step=17`，模板里的换算式也是 `17k+5` |
+
+**两个核心节点不能混用**（这是 v1.0.4 修掉的一处静默错误）：
+
+| 用途 | 节点类 | 参考/首帧输入 |
+|---|---|---|
+| 首尾帧驱动（FL2VA） | `MiniMaxH3ImageToVideo` | `first_frame` / `last_frame` |
+| 参考图驱动（Ref2VA） | `MiniMaxH3ReferenceToVideo` | `ref_image_0` … `ref_image_9`（Autogrow） |
+
+早先两个都走 `MiniMaxH3ImageToVideo`，参考图塞进一个**不存在**的 `reference_images`，
+被校验逻辑默默删掉 —— 片子照样出来，只是参考图完全没生效。现在：
+参考驱动走它自己的节点，并且**只要有任何「语义输入」被删掉就直接报错**，不再静默降级。
+
+另外，Turbo LoRA 是「几步版」就配几步：官方仓库里 fl2v 有 4step 与 8step 两个文件，
+文件名里写着步数，程序按文件名自动配（不带 LoRA 则 20 步）。
+
+> **为什么不用 comfy-cli**：它的 `install` 实际只认 `--skip-manager`，
+> `--nvidia` / `--yes` / `install --workspace` 这几种写法在官方文档里都不存在
+> （`--workspace` 还是全局参数，得写在子命令前面），`comfy node install <github-url>`
+> 也无效 —— 它要的是 Comfy Registry ID。与其赌一个没验证过的命令，不如直接下源码 zip
+> 再装 `requirements.txt`，每一步都能自己核对。这也是 v1.0.4 改掉的东西。
 
 ---
 
@@ -150,7 +208,7 @@ python build_exe.py
 
 ```bash
 iscc installer\aiverse.iss
-# -> installer/Output/AIVerse-Setup-1.0.3.exe
+# -> installer/Output/AIVerse-Setup-1.0.4.exe
 ```
 
 安装包会额外做两件事：
@@ -404,18 +462,24 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 | 8 阶段管线 + 审核门 | 首次启动自动播种示例项目，8/8 阶段跑满并逐阶段审核通过（约 2 秒） |
 | 角色 / 场景 / 道具资产化 | `entities?kind=character` 返回真实实体、带状态与版本号（v1.0.3 修的就是这条） |
 | 导出成片 | `tools/test_export.py` 用 ffmpeg 合成片段 → 真渲染 → ffprobe 校验分辨率 / 时长 / 音视频轨 / 编码；另外让 Release 里的 exe 自己导出过一个 408 KB、1080x1920、h264 的 MP4，抽帧肉眼确认中文字幕烧录正确 |
-| H3 生成链路 | `tools/test_h3_mock.py` 起一个假 ComfyUI，端到端跑通「提交 → 轮询 → 取回 MP4」 |
-| 一键部署 | `tools/test_deploy_slice.py` 从真实计划里挑最小的一步，真下载 → 解压 → 落盘 → exe 真执行 → 写 `state.json` → 再跑一遍确认幂等跳过 |
+| H3 生成链路 | `tools/test_h3_mock.py` 起一个假 ComfyUI，端到端跑通「提交 → 轮询 → 取回 MP4」；假 ComfyUI 的节点定义与输入名照 `comfy_extras/nodes_minimax_h3.py` 写 |
+| 一键部署 | `tools/test_deploy_slice.py` 从真实计划里挑最小的一步，真下载 → 解压 → 落盘 → exe 真执行 → 写 `state.json` → 再跑一遍确认幂等跳过；`--with-comfyui` 再多下 ComfyUI 源码包与 KJNodes，核对落点 |
 | 下载器 | `tools/test_downloader.py` 真下载 + 逐字节比对续传 + 垃圾缓存丢弃 + 取消 |
 | 59 个 API | `tools/test_api_surface.py` 逐个真调，5xx 一律算失败，外加 5 组行为断言 |
+| 权重清单与体积 | 用 HuggingFace API 列出 `Comfy-Org/MiniMax-H3` 的全部文件与真实字节数，12 个文件名、三个档位合计逐个对上 |
+| 节点类名 / 输入名 / 帧数规则 | 对着 ComfyUI 源码 `comfy_extras/nodes_minimax_h3.py` 与官方模板 `video_minimax_h3_i2v.json` 逐条核对（拓扑、输入名、`length` 的 `17k+5` 步长、默认采样器 `res_multistep` 与调度器 `simple`） |
 
 ### 还没验过的（说清楚，免得你踩）
 
 - **产物观感**：SVG 参考图、内置 TTS 的合成音，只验证了「文件生成了、尺寸对了、
   ffmpeg 能读」，没有做过主观质量评估。无 N 卡时这些都是占位产物，**不能当成品看**。
 - **novice / pro 两档模式**：开关是通的，但两档之间「默认行为差在哪」还没有对照测试。
-- **H3 真的接管为默认视频 Provider**：逻辑是「ComfyUI 连得上、H3 节点就绪才自动接管」。
-  手上没有 N 卡也没装 ComfyUI，这条只在假 ComfyUI 上验证过，**真机接管路径未验证**。
+- **H3 在真机上出片**：开发机没有 N 卡，也没装 ComfyUI。节点清单、输入名、权重名、
+  帧数栅格、图拓扑都是**对着官方源码与仓库核对**的，端到端链路是在**假 ComfyUI** 上跑通的；
+  但「一张 4090 上从点部署到出一段带音频的 MP4」这条完整路径，**没有真机验证过**。
+  第一次用请拿 2 秒的短片试水，别一上来就 5 秒 768p。
+- **模型下载的真实吞吐**：39 GB 那步只验证了「按文件白名单调用、体积核对逻辑正确」，
+  没有真下完过 39 GB（开发机 Python 出网被限制，这条在 CI 上跑）。
 - **成本数据**：接口能返回，但走本地 H3 时成本恒为 0；云端 Provider 的成本要接上真实
   API 才有意义。
 - **并发**：队列默认 2 个 worker，多项目同时跑的排队行为没有压测过。
@@ -427,6 +491,61 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 ---
 
 ## 九、更新日志
+
+### v1.0.4 —— 「环境部署」那一步到底装了什么东西，现在能对得上了
+
+起因是一个很直白的问题：「点击环境部署有真实功能吗」。
+于是把每一步拉出来逐个核对（对着官方仓库与文档，不是凭印象），发现三处对不上：
+
+- **修（最要命）**：模型下载的 `subdir` 参数收下了却**从来没被用过**。
+  用户选「量化版 26.4 GB」，实际执行的是 `snapshot_download(repo, allow_patterns=None)`
+  —— 把整个仓库拖下来。而这个仓库是 `MiniMaxAI/MiniMax-H3`（原始版，**354 GB**）。
+  进度条一路走，用户以为一切按计划进行，等几小时才发现不对。
+  现在改成**按文件白名单**下载，下完核对体积（不足 90% 直接报错并保留断点）。
+- **修**：模型仓库选错了。ComfyUI 需要的是 `Comfy-Org/MiniMax-H3`
+  （官方为 ComfyUI 重新打包的单文件版，目录结构与 `models/` 一一对应），
+  不是原始仓库 —— 原始仓库分 `FL2VA/` `Ref2VA/` 两套目录树，也没有 ComfyUI 要的单文件格式。
+  下载目标同步改到 `comfyui/models/`，下完 ComfyUI 立刻能认。
+- **修**：体积数字是编的。「量化版 26.4 GB」在真实仓库里不存在（没有 `quantized/` 目录），
+  而且光 Qwen3-VL-32B 文本编码器就 14.6 GB，主模型再省也省不掉它。
+  现在三个档位都是照实测字节数算的：**精简版 39.1 GB / 全能版 60.5 GB / 全精度版 92.7 GB**。
+- **修**：ComfyUI 的安装命令是错的。原来用 comfy-cli：
+  `comfy install --skip-manager --nvidia --workspace <path> --yes`，
+  而官方文档里 `install` 只认 `--skip-manager`，`--nvidia`/`--yes`/`install --workspace`
+  都不存在（`--workspace` 是全局参数，得写在子命令前面）；加速节点那步的
+  `comfy node install <github-url>` 也无效，它要的是 Comfy Registry ID。
+  改成**直接下 ComfyUI 源码 zip + 装 `requirements.txt`**，KJNodes 同理，
+  每一步都能自己核对，不再赌第三方 CLI 的参数。
+- **修**：H3 工作流的节点类名是猜的。原来写的是 `MiniMaxH3Loader` /
+  `MiniMaxH3Sampler` / `EmptyMiniMaxH3LatentVideo` —— 这些节点**根本不存在**。
+  真实情况是：ComfyUI ≥ 0.30.0 **原生支持** H3，用的是内置节点
+  （`UNETLoader` / `CLIPLoader` / `VAELoader` / `MiniMaxH3ImageToVideo` /
+  `SamplerCustomAdvanced` / `VAEDecodeAudio` / `CreateVideo` / `SaveVideo` …）。
+  现在整张图照官方模板 `video_minimax_h3_i2v.json` 重建（节点、输入名、默认值逐条对上），并且：
+  - 帧数按 H3 的硬约束落在 `17k+5` 栅格（24fps 下 5 秒 = 124 帧）
+  - 提交前拿 `/object_info` **校验一遍**：多余的输入删掉、缺的必需输入直接报出人话
+  - 「H3 是否就绪」不再被名字里带 h3 的干扰节点（如 `MiniMaxH3SageAttentionPatch`）骗过去
+- **修**：参考生视频走错了节点。H3 有**两个**核心节点，早先两个用途都用了
+  `MiniMaxH3ImageToVideo`，参考图塞进一个不存在的 `reference_images` 里 ——
+  校验时被默默删掉，片子照样出来，只是**参考图完全没生效**。
+  现在 Ref2VA 走它自己的 `MiniMaxH3ReferenceToVideo`，参考图接在 `ref_image_0…9`
+  （官方 Autogrow 命名）上；并且 `reconcile_graph()` 多了一条硬规则：
+  **只要被删掉的输入属于「语义输入」（参考图 / 首尾帧 / 权重名 / VAE / 尺寸…），
+  就直接判失败并报错**，不再给用户一个「看着成功了」的假结果。
+- **修**：Turbo LoRA 与步数没对上。官方仓库里 fl2v 有 4step 和 8step 两个 LoRA，
+  早先不管用哪个都跑 8 步。现在按文件名里的步数自动配（4step 配 4 步，不带 LoRA 配 20 步），
+  并把实际步数、实际 LoRA 名记进 manifest，便于复盘。
+- **加**：`tools/test_deploy_slice.py --with-comfyui` —— 真下 ComfyUI 源码包与 KJNodes，
+  校验 `main.py` / `requirements.txt` / `custom_nodes/ComfyUI-KJNodes/__init__.py`
+  的落点对不对（解压多剥一层目录这种错，只有真跑才看得见）。
+- **加**：假 ComfyUI 的节点清单换成**真实的 H3 节点定义与输入名**（照
+  `comfy_extras/nodes_minimax_h3.py` 的 `io.Schema` 写），`test_h3_mock.py` 从 7 组断言扩到 9 组：
+  含权重识别、帧数栅格、reconcile 三条分支（删多余 / 报缺必需 / **删到要紧输入就报错**）、
+  两种驱动节点不混用、步数跟 LoRA 走、权重缺失时的报错可读性。
+
+> 这一版没有任何界面变化（只在 H3 检测卡上多显示一行「出片节点 / 参考图驱动 / ComfyUI 版本」），
+> 但**强烈建议升级**：v1.0.3 及更早版本里，「一键部署」到了下权重那一步会下错东西（354 GB），
+> 后面几步也大概率直接失败；就算侥幸装上了，参考生视频也是「出片但参考图不生效」。
 
 ### v1.0.3 —— 把「跑通了但结果不对」的几个地方补上
 
@@ -441,7 +560,7 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
   资产化后状态给 `DRAFT`，审核门的语义不变，点「全部通过」才转 `APPROVED`。
 - **修**：`POST /api/runtime/install` 传一个不存在的模型版本会 500 + traceback。
   现在 `planner` 直接抛可读错误、路由兜成 400：
-  「没有这个模型版本：xxx。可选：h3-base-quant（MiniMax H3 量化版（推荐））…」。
+  「没有这个模型版本：xxx。可选：h3-lite（H3 精简版（文生 / 图生视频））…」。
 - **修**：`/api/runtime/comfy/stop` 原来执行的是
   `taskkill /F /IM python.exe /FI "WINDOWTITLE eq *runtime*"` ——
   按窗口标题杀 python。用户自己开着的 Jupyter、别的脚本，标题里沾上这两个字就一起没了。
@@ -486,7 +605,7 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 
 - **修**：`Downloader` 会把损坏文件当成功。测试里预置 1 MB 垃圾 `.part`，
   下载器报「100% 完成」，直到解压才 `BadZipFile` 崩掉。
-  放在 26.4 GB 的 H3 权重上，就是用户白等几小时才收到一句报错。
+  放在 39 GB 的 H3 权重上，就是用户白等几小时才收到一句报错。
   现在三道防线：`.part.meta` 记录来源与总大小 / 无记录的断点主动丢弃 /
   字节数对不上不改名。`unzip()` 坏包抛 `CorruptArchive`，安装器清缓存重下一次。
 - **修**：`github.com:443` 单独不可达时，组件下载没有退路。现在每个组件配多个候选镜像

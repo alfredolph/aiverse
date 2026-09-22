@@ -50,6 +50,13 @@ jobs:
         continue-on-error: true
         run: python tools/test_deploy_slice.py --skip-ffmpeg
 
+      # ComfyUI 以前靠 comfy-cli 装，而它的 install 只认 --skip-manager，
+      # --nvidia / --yes / install --workspace 都不存在、node install <url> 也无效。
+      # 改成直接下源码 zip 后，落点对不对必须有测试盯着。
+      - name: 部署器：ComfyUI 源码包 + KJNodes 落点（真实下载 35 MB）
+        continue-on-error: true
+        run: python tools/test_deploy_slice.py --skip-ffmpeg --with-comfyui
+
       # 剪辑导出：合成测试片段 → 真渲染 → ffprobe 校验产物。
       # 本机没有 ffmpeg 时它会自己用部署器装一份（约 92 MB）。
       # 这条就是为了防住「导出滤镜写错、但没显卡所以从没被执行到」那类问题。

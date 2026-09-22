@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -204,27 +205,66 @@ class Downloader:
 
     # ------------------------------------------------------------ 模型仓库
     def download_model_repo(self, repo: str, target: Path, backend: str = "modelscope",
-                            subdir: str = "", venv_python: Path | None = None,
+                            files: list[str] | None = None,
+                            venv_python: Path | None = None,
                             expected_gb: float = 0.0) -> Path:
-        """调用 modelscope / huggingface_hub CLI 下载整个仓库（自带续传与进度）。"""
+        """从 modelscope / huggingface_hub 拉取指定文件（自带续传）。
+
+        **必须传 files**。早先这里有个 `subdir` 参数，收下了却从没用过，
+        结果用户选「精简版 39 GB」，实际会把整个仓库（原始 H3 仓库 354 GB）拖下来 ——
+        这种错最坑：进度条一路走，用户以为在按计划下。
+
+        files 是仓库内的相对路径（形如 `diffusion_models/xxx.safetensors`），
+        而 ComfyUI 的 models/ 目录结构与之一一对应，所以 local_dir 直接指到
+        `comfyui/models`，文件就会落到 ComfyUI 期望的位置。
+        """
         target.mkdir(parents=True, exist_ok=True)
         py = str(venv_python or "python")
+        patterns = list(files or [])
+        if not patterns:
+            raise RuntimeError("未指定要下载的模型文件（拒绝整仓库下载）")
 
         if backend == "modelscope":
+            # modelscope 的 allow_patterns 参数名在不同版本里叫法不同
+            # （allow_patterns / allow_file_pattern），所以两种都试一次。
             code = (
-                "import sys;from modelscope import snapshot_download as d;"
-                f"d('{repo}', local_dir=r'{target}', allow_patterns=None);"
-                "print('OK')"
+                "from modelscope import snapshot_download as d\n"
+                f"kw = dict(local_dir=r'{target}')\n"
+                f"try:\n"
+                f"    d(r'{repo}', allow_patterns={patterns!r}, **kw)\n"
+                f"except TypeError:\n"
+                f"    d(r'{repo}', allow_file_pattern={patterns!r}, **kw)\n"
+                "print('OK')\n"
             )
         else:
             code = (
-                "from huggingface_hub import snapshot_download as d;"
-                f"d(repo_id='{repo}', local_dir=r'{target}', max_workers=4);"
-                "print('OK')"
+                "from huggingface_hub import snapshot_download as d\n"
+                f"d(repo_id=r'{repo}', local_dir=r'{target}', "
+                f"allow_patterns={patterns!r}, max_workers=4)\n"
+                "print('OK')\n"
             )
 
+        total_bytes = int(expected_gb * 1024 ** 3)
         self.progress({"phase": "download", "label": f"模型 {repo}",
-                       "percent": 0.0, "message": f"正在从 {backend} 拉取 {repo}（大文件，请耐心等待）…"})
+                       "percent": 0.0,
+                       "message": f"正在从 {backend} 拉取 {len(patterns)} 个文件"
+                                  f"（约 {expected_gb:.1f} GB，请耐心等待）…"})
+
+        # 目录体积轮询：modelscope / hf 的 tqdm 进度条是 \r 刷新的，
+        # 按行读根本读不到百分比。所以自己盯着目录长多大，进度才真的会动。
+        stop_poll = threading.Event()
+
+        def poll() -> None:
+            while not stop_poll.wait(3.0):
+                got = _dir_size(target)
+                pct = round(min(got / total_bytes * 100, 99.0), 2) if total_bytes else 0.0
+                self.progress({"phase": "download", "label": f"模型 {repo}",
+                               "percent": pct,
+                               "message": f"已下载 {human_size(got)} / "
+                                          f"{expected_gb:.1f} GB"})
+
+        poller = threading.Thread(target=poll, name="aiverse-model-progress", daemon=True)
+        poller.start()
 
         proc = subprocess.Popen(
             [py, "-c", code], cwd=str(target), stdout=subprocess.PIPE,
@@ -232,33 +272,47 @@ class Downloader:
             bufsize=1,
         )
         t0 = time.time()
-        for line in proc.stdout:               # type: ignore[union-attr]
-            if self.is_cancelled():
-                proc.kill()
-                raise Cancelled()
-            line = line.strip()
-            if not line:
-                continue
-            # 把 CLI 的百分比行转成统一进度
-            pct = _parse_percent(line)
-            if pct is not None:
-                self.progress({"phase": "download", "label": f"模型 {repo}",
-                               "percent": pct, "message": line[:120]})
-            elif "%" not in line:
-                self.progress({"phase": "download", "label": f"模型 {repo}",
-                               "percent": 0.0, "message": line[:120]})
-            # 兜底：估算体积进度
-            elif expected_gb:
-                got = _dir_size(target) / (expected_gb * 1024 ** 3) * 100
-                self.progress({"phase": "download", "label": f"模型 {repo}",
-                               "percent": round(min(got, 99.0), 2),
-                               "message": line[:120]})
-        proc.wait()
+        tail: list[str] = []
+        try:
+            for line in proc.stdout:               # type: ignore[union-attr]
+                if self.is_cancelled():
+                    proc.kill()
+                    raise Cancelled()
+                line = line.strip()
+                if not line:
+                    continue
+                # 留最后几行，出错时好告诉用户到底哪一步炸了
+                tail.append(line[:200])
+                tail[:] = tail[-8:]
+                pct = _parse_percent(line)
+                if pct is not None:
+                    self.progress({"phase": "download", "label": f"模型 {repo}",
+                                   "percent": pct, "message": line[:120]})
+                elif "%" not in line:
+                    self.progress({"phase": "download", "label": f"模型 {repo}",
+                                   "percent": 0.0, "message": line[:120]})
+            proc.wait()
+        finally:
+            stop_poll.set()
+
         if proc.returncode != 0:
-            raise RuntimeError(f"模型下载失败（退出码 {proc.returncode}）")
+            raise RuntimeError(
+                f"模型下载失败（退出码 {proc.returncode}）："
+                + (" / ".join(tail[-3:]) or "无输出")
+            )
+
+        got = _dir_size(target)
+        if total_bytes and got < total_bytes * 0.9:
+            # 退出码是 0 但体积明显不够 —— 常见于仓库文件被改名 / 网络中间截断
+            raise RuntimeError(
+                f"模型文件不完整：只下到 {human_size(got)}，"
+                f"预期约 {expected_gb:.1f} GB。请检查仓库 {repo} 是否仍有这些文件，"
+                f"或换镜像源后重试（已下载的部分会续传）"
+            )
 
         self.progress({"phase": "done", "label": f"模型 {repo}", "percent": 100.0,
-                       "message": f"{repo} 下载完成，耗时 {int(time.time() - t0)}s"})
+                       "message": f"{repo} 下载完成（{human_size(got)}），"
+                                  f"耗时 {int(time.time() - t0)}s"})
         return target
 
 
