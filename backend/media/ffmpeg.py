@@ -75,16 +75,26 @@ _DETECT_LOCK = threading.Lock()
 
 
 def detect(fresh: bool = False) -> dict[str, Any]:
-    """探测 ffmpeg 是否可用（结果缓存 30 秒）。
+    """探测 ffmpeg 是否可用。
 
-    `/api/meta` 与 `/api/runtime/plan` 都会调它，而每次探测都要起一个子进程
-    跑 `ffmpeg -version`，不缓存的话页面刷新一下就多花几百毫秒。
+    `/api/meta` 与 `/api/runtime/plan` 都会调它，而「可用」时每次探测都要起一个
+    子进程跑 `ffmpeg -version`，所以结果缓存 30 秒。
+
+    **只缓存「可用」的结果，不缓存「不可用」**（别改回去）：
+    一键部署 4 秒就能把 FFmpeg 装好，而 `planner.build_plan()` 在部署开始前
+    刚调过一次 `detect()`（那时确实还没有）。要是把「不可用」也缓存 30 秒，
+    装完之后界面会继续显示「FFmpeg 未安装」，导出也就一直失败 ——
+    CI 里 `tools/test_export.py` 就是这么红的。
+    「不可用」时根本没起子进程，只是几个 `Path.exists()`，不缓存也没有代价。
     """
     global _DETECT_CACHE
     with _DETECT_LOCK:
         hit = _DETECT_CACHE
     if not fresh and hit and time.time() - hit[0] < 30.0:
-        return dict(hit[1])
+        # 缓存命中也要确认那份文件还在 —— 用户可能刚卸载 / 删掉了
+        p0 = hit[1].get("path")
+        if p0 and Path(p0).exists():
+            return dict(hit[1])
 
     p = ffmpeg_path()
     if not p:
@@ -105,7 +115,7 @@ def detect(fresh: bool = False) -> dict[str, Any]:
                    "hint": f"FFmpeg 探测失败：{e}"}
 
     with _DETECT_LOCK:
-        _DETECT_CACHE = (time.time(), res)
+        _DETECT_CACHE = (time.time(), res) if res["available"] else None
     return dict(res)
 
 

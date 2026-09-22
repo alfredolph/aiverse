@@ -45,14 +45,14 @@ def main() -> int:
         old_base, old_rt = cfg.BASE_DIR, cfg.RUNTIME_DIR
         cfg.BASE_DIR, cfg.RUNTIME_DIR = fake_base, fake_rt
         try:
-            print("\n[1/4] 一份都没有时：如实说没有")
+            print("\n[1/5] 一份都没有时：如实说没有")
             ff._DETECT_CACHE = None
             d = ff.detect(fresh=True)
             need(d["available"] is False or "runtime" not in str(d.get("path") or ""),
                  f"找不到时如实返回不可用（{d['hint'][:40]}）",
                  "一份都没有时应返回 available=False")
 
-            print("\n[2/4] 自带的那份：要能被认出来")
+            print("\n[2/5] 自带的那份：要能被认出来")
             bundled_dir = fake_base / "ffmpeg" / "bin"
             bundled_dir.mkdir(parents=True)
             (bundled_dir / "ffmpeg.exe").write_bytes(b"fake")     # 只是让 exists() 为真
@@ -71,7 +71,7 @@ def main() -> int:
             need(str(bundled_dir) in str(d["path"]), f"路径指向自带那份：{d['path']}",
                  f"路径不对：{d['path']}")
 
-            print("\n[3/4] runtime 里后来又装了一份：应以 runtime 那一份为准")
+            print("\n[3/5] runtime 里后来又装了一份：应以 runtime 那一份为准")
             rt_dir = fake_rt / "ffmpeg" / "bin"
             rt_dir.mkdir(parents=True)
             (rt_dir / "ffmpeg.exe").write_bytes(b"fake")
@@ -91,7 +91,7 @@ def main() -> int:
             need(d2["bundled"] is False, "runtime 那份的 bundled 标记为 False",
                  "runtime 那份是用户自己部署的，bundled 应为 False")
 
-            print("\n[4/4] ffprobe 独立查找 + 部署计划不再重复下载")
+            print("\n[4/5] ffprobe 独立查找 + 部署计划不再重复下载")
             # ffprobe 只装在 runtime 里、ffmpeg 用的是自带那份 —— 这个组合
             # 在旧实现里会让 ffprobe 永远找不到。
             (rt_dir / "ffprobe.exe").write_bytes(b"fake")
@@ -117,6 +117,31 @@ def main() -> int:
             need("ffmpeg" in keys2,
                  "FFmpeg 不可用时，部署计划里必须排上下载",
                  f"没有可用 FFmpeg 时计划里却没有它：{keys2}")
+
+            print("\n[5/5] 刚装好的那份必须立刻能被检测到")
+            # 这是 v1.0.6 自己引入又修掉的一个坑：
+            # planner.build_plan() 在部署**开始前**调过一次 detect()（那时确实没有），
+            # 要是把「不可用」也缓存 30 秒，装完之后界面会继续显示「未安装」，
+            # 导出就一直失败 —— CI 里 test_export.py 就是这么红的。
+            fresh_rt = root / "runtime3"
+            cfg.RUNTIME_DIR = fresh_rt
+            ff._DETECT_CACHE = None
+            before = ff.detect()
+            need(before["available"] is False, "装之前确实没有（前置条件）")
+
+            new_dir = fresh_rt / "ffmpeg" / "bin"
+            new_dir.mkdir(parents=True)
+            (new_dir / "ffmpeg.exe").write_bytes(b"fake")
+            real_run = subprocess.run
+            ff.subprocess.run = (                                  # type: ignore[assignment]
+                lambda *a, **k: _FakeCompleted("ffmpeg version 7.1 fake\n"))
+            try:
+                after = ff.detect()          # 注意：不传 fresh=True
+            finally:
+                ff.subprocess.run = real_run                       # type: ignore[assignment]
+            need(after["available"] is True,
+                 f"装完立刻就能检测到（{after['version'][:24]}）",
+                 "装完之后 detect() 仍说不可用 —— 「不可用」的结果被缓存挡住了")
         finally:
             cfg.BASE_DIR, cfg.RUNTIME_DIR = old_base, old_rt
 
