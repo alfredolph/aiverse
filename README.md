@@ -69,7 +69,7 @@ ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是�
 
 ### 方式 B：安装包（含开始菜单 / 卸载）
 
-下载 `AIVerse-Setup-1.0.0.exe` 运行安装向导。默认装到
+下载 `AIVerse-Setup-1.0.1.exe` 运行安装向导。默认装到
 `%LOCALAPPDATA%\Programs\AI Studio`，**无需管理员权限**；卸载时不会删除你的项目数据
 **也不会删除已下载的 30 GB 运行时**（重装后可直接复用）。
 
@@ -123,6 +123,10 @@ python run.py --host 0.0.0.0  # 开放局域网（手机控制）
 
 - **镜像可选**：国内（ModelScope / 清华源 / 上海交大 torch 源）或海外（HuggingFace）。国内线路下 26.4 GB 大约快 3~10 倍
 - **断点续传**：HTTP Range 续传 + 多镜像自动回退；关掉程序再打开，已下载的部分不重来
+- **续传必须校验**：`.part` 旁边会留一份 `.part.meta` 记录「来源 URL + 远端总大小」。
+  对不上就丢弃重下，字节数不足就**不改名**、保留断点。
+  这一段是刻意做重的：26 GB 的模型如果拼进了坏数据，会在解压或加载时才报错，
+  用户已经白等几个小时。宁可多下一次，也不让用户拿到坏安装。
 - **幂等**：已装好的步骤自动跳过；失败可单步重试
 - **可取消**：随时中止，已下载文件保留
 - **不污染系统**：所有东西都进 `runtime/`，不动注册表、不改 PATH、不装全局 Python 包
@@ -146,7 +150,7 @@ python build_exe.py
 
 ```bash
 iscc installer\aiverse.iss
-# -> installer/Output/AIVerse-Setup-1.0.0.exe
+# -> installer/Output/AIVerse-Setup-1.0.1.exe
 ```
 
 安装包会额外做两件事：
@@ -163,7 +167,7 @@ iscc installer\aiverse.iss
 推一个 `v*` 标签就会自动在 Windows runner 上打包、跑健康检查、并把 exe 挂到 Release。
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
 ---
@@ -376,6 +380,35 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 | 8 本地 GPU 和云端自由切换 | Local / Cloud / Hybrid 模式 + Provider 切换 |
 | 9 工作流必须可以由 AI 生成 | Director Agent `plan()` 接口 |
 | 10 随模型发展升级而非过时 | 新增模型只需加一个 Adapter，上层全部复用 |
+
+---
+
+## 九、更新日志
+
+### v1.0.1 —— 把「一键部署」的地基修牢
+
+只动了一键部署链路，界面和功能没变。但这一版**建议一定要升**：
+
+- **修**：`Downloader` 会把损坏文件当成功。测试里预置 1 MB 垃圾 `.part`，
+  下载器报「100% 完成」，直到解压才 `BadZipFile` 崩掉。
+  放在 26.4 GB 的 H3 权重上，就是用户白等几小时才收到一句报错。
+  现在三道防线：`.part.meta` 记录来源与总大小 / 无记录的断点主动丢弃 /
+  字节数对不上不改名。`unzip()` 坏包抛 `CorruptArchive`，安装器清缓存重下一次。
+- **修**：`github.com:443` 单独不可达时，组件下载没有退路。现在每个组件配多个候选镜像
+  （ghproxy / gh-proxy / 直连）依次回退。
+- **修**：H3 节点识别漏掉「中间插词」的类名（`MiniMaxH3EmptyLatentVideo`）。
+  新增关键词加权兜底，识别失败不再依赖精确类名。
+- **修**：本机对连不上的本地端口会静默丢包，端口探测每次白等 1~2 秒，
+  叠加前端 2 秒轮询后，示例项目要跑 105 秒。现在探测超时压到 0.2 秒 + TTL 缓存，
+  **105 秒 → 2 秒**。
+- **加**：`tools/test_h3_mock.py`（假 ComfyUI 端到端跑通生成链路）、
+  `tools/test_downloader.py`（真实下载 + 续传逐字节比对 + 解压 + 执行 + 取消）。
+  两个都进了 CI，以后这类问题不用靠运气发现。
+
+### v1.0.0 —— 首个可安装版本
+
+零依赖后端 + 原生 SPA、8 阶段管线与强制审核门、Provider 抽象层、
+一键部署本地 MiniMax H3 运行时、离线包分发、单文件 exe + Inno Setup 安装包。
 
 ---
 

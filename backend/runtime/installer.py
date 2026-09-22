@@ -19,7 +19,7 @@ from typing import Any
 from ..core import db
 from ..core.config import RUNTIME_DIR
 from . import catalog, planner
-from .downloader import Cancelled, Downloader, human_size
+from .downloader import Cancelled, CorruptArchive, Downloader, human_size
 
 STATE_FILE = RUNTIME_DIR / "state.json"
 COMFY_URL = "http://127.0.0.1:8188"
@@ -145,7 +145,8 @@ class Installer:
         dl = Downloader(progress=None, is_cancelled=self._cancel.is_set)
         rt = RUNTIME_DIR
         rt.mkdir(parents=True, exist_ok=True)
-        m = catalog.MIRRORS.get(plan["mirror"], catalog.MIRRORS["cn"])
+        m = dict(catalog.MIRRORS.get(plan["mirror"], catalog.MIRRORS["cn"]))
+        m["_key"] = plan["mirror"] if plan["mirror"] in catalog.MIRRORS else "cn"
         self._log(f"开始部署，目标目录 {rt}，预计下载 {plan['total_download_human']}")
 
         try:
@@ -236,16 +237,35 @@ class Installer:
         key = s["key"]
         if key == "uv":
             dest = rt / "uv" / "uv.exe"
-            url = m["uv"]
         elif key == "ffmpeg":
             dest = rt / "ffmpeg" / "bin" / "ffmpeg.exe"
-            url = m["ffmpeg"]
         else:
             raise RuntimeError(f"未配置下载地址：{key}")
 
+        # 同一个组件给多个镜像候选，前一个挂了自动换下一个
+        urls = catalog.component_urls(key, m.get("_key") or "cn")
+        if not urls:
+            raise RuntimeError(f"未配置下载地址：{key}")
+
         tmp = rt / "cache" / f"{key}.zip"
-        dl.fetch([url], tmp, label=s["name"], expected_gb=s["size_gb"])
-        dl.unzip(tmp, rt / key)
+        for attempt in (1, 2):
+            try:
+                dl.fetch(urls, tmp, label=s["name"], expected_gb=s["size_gb"])
+                dl.unzip(tmp, rt / key)
+                break
+            except CorruptArchive as e:
+                # 压缩包坏了通常是缓存被污染（续传到了垃圾数据）。
+                # 清掉重下一次，还坏就老实报错，别让用户拿到一个坏安装。
+                self._log(f"  ! {s['name']} 压缩包损坏，清理缓存后重下：{e}")
+                for p in (tmp, tmp.with_suffix(tmp.suffix + ".part"),
+                          tmp.with_suffix(tmp.suffix + ".part.meta")):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+                if attempt == 2:
+                    raise
+
         try:
             tmp.unlink()
         except OSError:
@@ -258,6 +278,8 @@ class Installer:
                 if found != dest:
                     import shutil
                     shutil.copy2(found, dest)
+        if not dest.exists():
+            raise RuntimeError(f"{s['name']} 安装后仍未找到 {dest.name}，安装不完整")
 
     def _do_exec(self, cmd: list[str], cwd: str, key: str) -> None:
         exe = Path(cmd[0])

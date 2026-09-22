@@ -14,7 +14,31 @@ env:
   PYTHONIOENCODING: 'utf-8'
 
 jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 语法检查
+        run: python -m compileall -q backend tools run.py build_exe.py
+
+      - name: H3 生成链路（假 ComfyUI 端到端，全本地）
+        run: python tools/test_h3_mock.py
+
+      # 真下载 17 MB 验证断点续传/解压。走公网镜像，偶发抖动不该拦发布，
+      # 所以标了 continue-on-error —— 红了要去看日志，但不阻断出包。
+      - name: 下载器完整性（真实下载 + 续传 + 解压）
+        continue-on-error: true
+        run: python tools/test_downloader.py
+
   build:
+    needs: verify
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -120,4 +144,4 @@ jobs:
 
             两个附件：
             - `AIVerse.exe` —— 绿色版，双击即用，数据随 exe 走
-            - `AIVerse-Setup-1.0.0.exe` —— 安装版，开始菜单/桌面快捷方式，卸载不删项目与模型
+            - `AIVerse-Setup-<版本>.exe` —— 安装版，开始菜单/桌面快捷方式，卸载不删项目与模型

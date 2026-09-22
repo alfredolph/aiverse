@@ -29,6 +29,46 @@ MIRRORS: dict[str, dict[str, str]] = {
     },
 }
 
+# ---------------------------------------------------------------- 组件下载候选
+# uv / ffmpeg 的官方发布页在 GitHub，而某些网络会单独屏蔽 github.com:443
+# （实测：api / codeload / uploads 都通，只有 github.com 被丢包）。
+# 所以每个组件都准备多个候选，下载器会依次尝试，前一个挂了自动换下一个。
+#
+# 顺序原则：选中的镜像源排第一，其余按「不依赖 github.com」优先。
+_UV_GH = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+_FF_GH = ("https://github.com/GyanD/codexffmpeg/releases/download/7.1/"
+          "ffmpeg-7.1-essentials_build.zip")
+
+COMPONENT_MIRRORS: dict[str, dict[str, list[str]]] = {
+    "uv": {
+        "cn": [f"https://ghproxy.net/{_UV_GH}",
+               f"https://gh-proxy.com/{_UV_GH}",
+               _UV_GH],
+        "global": [_UV_GH, f"https://ghproxy.net/{_UV_GH}"],
+    },
+    "ffmpeg": {
+        "cn": [f"https://ghproxy.net/{_FF_GH}",
+               f"https://gh-proxy.com/{_FF_GH}",
+               _FF_GH],
+        "global": [_FF_GH, f"https://ghproxy.net/{_FF_GH}"],
+    },
+}
+
+
+def component_urls(key: str, mirror: str = "cn") -> list[str]:
+    """返回某组件的下载候选列表（去重，保持顺序）。"""
+    table = COMPONENT_MIRRORS.get(key) or {}
+    urls = list(table.get(mirror) or [])
+    primary = (MIRRORS.get(mirror) or {}).get(key)
+    if primary:
+        urls.insert(0, primary)
+    seen, out = set(), []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
 # ---------------------------------------------------------------- 模型仓库
 # H3 开放权重。仓库 ID 会随官方更新变化，用户可在设置里覆盖。
 MODEL_REPOS: dict[str, dict[str, Any]] = {

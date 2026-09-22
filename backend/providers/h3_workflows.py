@@ -44,24 +44,65 @@ NODE_HINTS: dict[str, list[str]] = {
     "vae_decode": ["vaedecode"],
 }
 
+# 关键词兜底：不同 H3 节点包的类名会「中间插词」，
+# 例如 MiniMaxH3EmptyLatentVideo —— 单纯子串匹配永远命中不了
+# `minimaxh3latentvideo`，所以再给一层「必须满足 + 加权加分」的规则。
+#   must     : 必须全部出现
+#   must_any : 至少出现一个
+#   any      : 出现越多分越高（用来在多个候选里挑最像的）
+NODE_KEYWORDS: dict[str, dict[str, list[str]]] = {
+    "model_loader": {"must": ["loader"], "any": ["minimax", "h3", "model"]},
+    "sampler": {"must_any": ["sampler", "scheduler"], "any": ["minimax", "h3"]},
+    "latent_video": {"must": ["latent"], "any": ["minimax", "h3", "empty", "video"]},
+    "video_output": {"must_any": ["savevideo", "createvideo",
+                                  "videocombine", "savewebm", "saveanimated"]},
+    "load_image": {"must": ["loadimage"]},
+    "text_encode": {"must": ["textencode"], "any": ["clip"]},
+    "vae_decode": {"must": ["vaedecode"]},
+}
+
+
+def _best_by_keywords(lower: dict[str, str], kw: dict[str, list[str]]) -> str | None:
+    must = kw.get("must") or []
+    must_any = kw.get("must_any") or []
+    any_ = kw.get("any") or []
+    best, best_score = None, -1
+    for low, orig in lower.items():
+        if must and not all(m in low for m in must):
+            continue
+        if must_any and not any(m in low for m in must_any):
+            continue
+        score = sum(1 for a in any_ if a in low)
+        if any_ and score == 0:
+            continue
+        if score > best_score:
+            best, best_score = orig, score
+    return best
+
 
 def autodetect_node_map(object_info: dict[str, Any],
                         current: dict[str, str] | None = None) -> dict[str, str]:
-    """从 ComfyUI /object_info 的节点清单里推断节点映射。"""
+    """从 ComfyUI /object_info 的节点清单里推断节点映射。
+
+    两级策略：先精确/子串匹配（快且准），命中不了再用关键词兜底，
+    这样面对各种命名风格的 H3 节点包都能接上，而不是直接崩在「节点不存在」。
+    """
     mapping = dict(current or DEFAULT_NODE_MAP)
-    names = list(object_info.keys())
-    lower = {n.lower(): n for n in names}
+    lower = {n.lower(): n for n in object_info.keys()}
 
     for role, hints in NODE_HINTS.items():
+        hit = None
         for hint in hints:
-            # 先精确匹配，再子串匹配
             if hint in lower:
-                mapping[role] = lower[hint]
+                hit = lower[hint]
                 break
             hit = next((orig for low, orig in lower.items() if hint in low), None)
             if hit:
-                mapping[role] = hit
                 break
+        if not hit:
+            hit = _best_by_keywords(lower, NODE_KEYWORDS.get(role) or {})
+        if hit:
+            mapping[role] = hit
     return mapping
 
 
