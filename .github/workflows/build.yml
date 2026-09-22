@@ -1,0 +1,53 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build AIVerse.exe
+        run: python build_exe.py
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/AIVerse.exe -ArgumentList '--no-open','8799' -PassThru
+          Start-Sleep -Seconds 6
+          try {
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/health' -UseBasicParsing -TimeoutSec 10
+            Write-Host "health -> $($r.StatusCode) $($r.Content)"
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIVerse-windows-x64
+          path: dist/AIVerse.exe
+          if-no-files-found: error
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AIVerse.exe
+          generate_release_notes: true

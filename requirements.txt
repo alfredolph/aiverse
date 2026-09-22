@@ -1,0 +1,4 @@
+# AIVerse 运行时零第三方依赖，仅需 Python 3.10+ 标准库。
+#
+# 打包为 Windows 可执行文件时才需要：
+pyinstaller>=6.0
