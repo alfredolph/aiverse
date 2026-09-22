@@ -1,0 +1,18 @@
+# 统一换行符：仓库里一律存 LF，检出时按平台转换。
+# 不加这个文件的话，Windows 上写出来的 CRLF 会被整份提交进仓库，
+# 一个只改了几行的文件在 diff 里会显示成「整个文件都变了」。
+* text=auto
+
+# 二进制文件不要做任何换行符/编码处理
+*.ico  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.wav  binary
+*.mp3  binary
+*.mp4  binary
+*.zip  binary
+*.exe  binary
+*.ttf  binary
+*.woff2 binary
