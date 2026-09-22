@@ -8,7 +8,9 @@
 这里挑计划里体积较小的 `download_zip` 步骤真跑（uv 17 MB + FFmpeg 92 MB）：
     _run() 全程 → 两个 exe 真执行 → state.json 内容 → status() → 幂等重跑
 
-`--with-comfyui` 会再加两步：ComfyUI 源码包（约 30 MB）与 KJNodes（约 5 MB）。
+`--with-comfyui` 会再加两步：ComfyUI 源码包（约 41 MB）与 KJNodes（约 20 MB，
+计划里的 key 是 `comfy-nodes`，且要显式 `include_nodes=True` 才会出现 ——
+没有 N 卡的机器上真实计划本来就不含它）。
 为什么专门测它俩：ComfyUI 以前是用 comfy-cli 装的，而它的 `install` 其实只认
 `--skip-manager`，`--nvidia` / `--yes` / `install --workspace` 这几个写法官方文档里
 都没有，`node install <github-url>` 也无效（要的是 Registry ID）—— 也就是说那一步
@@ -95,15 +97,25 @@ def main() -> int:
 
     # ------------------------------------------------------ [1/5] 计划过滤
     print("\n[1/5] 从真实部署计划里挑出 download_zip 步骤")
+    # 注意 include_nodes=True 是**必须显式给**的：没有 N 卡的机器上真实计划里
+    # 本来就不含 comfy-nodes（KJNodes 是加速节点，只对有 GPU 的档位有意义）。
+    # 之前这里只给了 args.with_comfyui，CI（无 N 卡）上计划里就没有 KJNodes，
+    # 于是「KJNodes 落点」那条断言从来没被真正跑到过。
     plan = planner.build_plan(mirror="cn", include_nodes=args.with_comfyui)
     want = {"uv"}
     if not args.skip_ffmpeg:
         want.add("ffmpeg")
     if args.with_comfyui:
-        want |= {"comfyui", "kj-nodes"}
+        want |= {"comfyui", "comfy-nodes"}
     steps = [s for s in plan["steps"] if s["key"] in want]
     got = {s["key"] for s in steps}
     need(got == want, f"计划里应有 {want}，实际 {got}", f"取到步骤：{sorted(got)}")
+    if got != want:
+        # 计划本身就不对，后面每条断言都会跟着错，没必要刷一屏重复失败
+        print("\n" + "─" * 60)
+        print(f"✗ 计划里缺少 {sorted(want - got)}，先修计划再看落地结果")
+        print(f"  完整计划：{[s['key'] for s in plan['steps']]}")
+        return 1
     total_gb = sum(s.get("size_gb", 0) for s in steps)
     plan = dict(plan, steps=steps,
                 total_download_human=f"{total_gb * 1024:.0f} MB")

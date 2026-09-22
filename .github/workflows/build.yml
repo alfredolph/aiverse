@@ -39,7 +39,10 @@ jobs:
 
       # 真下载 17 MB 验证断点续传/解压。走公网镜像，偶发抖动不该拦发布，
       # 所以标了 continue-on-error —— 红了要去看日志，但不阻断出包。
+      # 每个都带 id，最后那个「验证汇总」会把结果摊成一张表写进 run summary：
+      # continue-on-error 的步骤在 GitHub 界面上也是绿勾，只看勾会漏掉真失败。
       - name: 下载器完整性（真实下载 + 续传 + 解压）
+        id: t_downloader
         continue-on-error: true
         run: python tools/test_downloader.py
 
@@ -47,13 +50,15 @@ jobs:
       # 下载 → 解压 → 落地 → exe 真执行 → state.json → 幂等跳过。
       # 只取计划里最小的那一步，不然要下 30 GB。同样走公网。
       - name: 部署器本体（_run 端到端，--skip-ffmpeg）
+        id: t_deploy
         continue-on-error: true
         run: python tools/test_deploy_slice.py --skip-ffmpeg
 
       # ComfyUI 以前靠 comfy-cli 装，而它的 install 只认 --skip-manager，
       # --nvidia / --yes / install --workspace 都不存在、node install <url> 也无效。
       # 改成直接下源码 zip 后，落点对不对必须有测试盯着。
-      - name: 部署器：ComfyUI 源码包 + KJNodes 落点（真实下载 35 MB）
+      - name: 部署器：ComfyUI 源码包 + KJNodes 落点（真实下载 61 MB）
+        id: t_comfyui
         continue-on-error: true
         run: python tools/test_deploy_slice.py --skip-ffmpeg --with-comfyui
 
@@ -61,8 +66,32 @@ jobs:
       # 本机没有 ffmpeg 时它会自己用部署器装一份（约 92 MB）。
       # 这条就是为了防住「导出滤镜写错、但没显卡所以从没被执行到」那类问题。
       - name: 剪辑导出（真渲染 + ffprobe 校验）
+        id: t_export
         continue-on-error: true
         run: python tools/test_export.py
+
+      # 把上面几个 continue-on-error 的步骤结果摊成一张表。
+      # 它们在 GitHub 界面上都显示绿勾，只看勾会把「其实失败了」漏过去 ——
+      # v1.0.4 就踩过一次：新加的 ComfyUI 落点测试断言写错了步骤 key，
+      # 明明红了，界面上仍是 ✓。
+      - name: 验证汇总（continue-on-error 的步骤也如实列出）
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### 验证结果"
+            echo ""
+            echo "| 步骤 | 结果 |"
+            echo "|---|---|"
+            echo "| 下载器完整性 | ${{ steps.t_downloader.outcome }} |"
+            echo "| 部署器本体 | ${{ steps.t_deploy.outcome }} |"
+            echo "| ComfyUI + KJNodes 落点 | ${{ steps.t_comfyui.outcome }} |"
+            echo "| 剪辑导出 | ${{ steps.t_export.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "下载器=${{ steps.t_downloader.outcome }} 部署器=${{ steps.t_deploy.outcome }} ComfyUI=${{ steps.t_comfyui.outcome }} 导出=${{ steps.t_export.outcome }}"
+          if [ "${{ steps.t_comfyui.outcome }}" = "failure" ]; then
+            echo "::warning title=ComfyUI 落点测试失败::这条是「一键部署」能不能装成 ComfyUI 的唯一证据，红了要去翻日志"
+          fi
 
   build:
     needs: verify
@@ -175,11 +204,14 @@ jobs:
             | **编排大脑**（本项目） | **约 10 MB** | 安装包里，双击即用 |
             | 剧本/角色/场景/分镜 Agent、审核门、抽卡、局部重生成、时间线、字幕、剪辑导出 | 同上 | 同上 |
             | **一键部署器**（自动装下面这一堆） | 同上 | 同上 |
-            | Python 隔离环境 + PyTorch + CUDA | 约 2.5 GB | 首次部署时自动装 |
-            | ComfyUI 执行引擎 | 约 2.4 GB | 首次部署时自动装 |
-            | **MiniMax H3 权重（33B 参数，量化版）** | **26.4 GB** | 首次部署时自动下 |
+            | Python 隔离环境 + PyTorch + CUDA | 约 1 GB | 首次部署时自动装 |
+            | ComfyUI 执行引擎 + 运行依赖 | 约 1.3 GB | 首次部署时自动装 |
+            | FFmpeg（导出用） | 约 92 MB | 首次部署时自动装 |
+            | **MiniMax H3 权重（33B 参数）** | **39.1 / 60.5 / 92.7 GB 三档** | 首次部署时自动下 |
 
-            MiniMax H3 是 33B 参数的全模态视频模型，量化权重 26.4 GB（BF16 版 50+ GB）。
+            MiniMax H3 是 33B 参数的全模态视频模型，ComfyUI 官方单文件版最小的档位
+            （精简版：FL2VA 主模型 + Qwen3-VL 文本编码器 + 视频/音频 VAE + 4 步 Turbo LoRA）
+            就是 **39.1 GB**；全能版 60.5 GB，全精度 BF16 版 92.7 GB。
             没有任何办法把它压进 10 MB 的 exe —— 这不是取舍问题，是物理问题。
             ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是「小安装包 + 首次运行下载」。
 
@@ -187,12 +219,12 @@ jobs:
 
             | 你的情况 | 该怎么做 |
             |---|---|
-            | 有网、有 N 卡 | 安装 → 点「⚡ 一键部署」→ 等 20~60 分钟 → 开始出片。全程只点一次 |
+            | 有网、有 N 卡 | 安装 → 点「⚡ 一键部署」→ 选档位 → 等 1~3 小时 → 开始出片。全程只点一次 |
             | 没网 / 网慢 / 要给多台机器装 | 任意一台部署好 → 「📦 导出离线包」→ 拷 U 盘 → 其他机器「📥 导入离线包」，**零下载** |
             | 完全不想碰本地算力 | 装好后不部署，直接在「设置」里接云端 Provider（OpenAI 兼容 / 官方 H3 API） |
 
-            **硬件门槛**：8 GB 显存能跑（慢但不崩）、12 GB 舒适、24 GB 随便跑；原生输出 768p。
-            中文口播偏弱，建议用内置 TTS 走后期配音。
+            **硬件门槛**：8 GB 显存能跑精简版（慢但不崩）、12 GB 起跑全能版、24 GB 上全精度；
+            原生输出 768p，自带音频轨。中文口播偏弱，建议用内置 TTS 走后期配音。
 
             ---
 
@@ -202,3 +234,7 @@ jobs:
             两个附件：
             - `AIVerse.exe` —— 绿色版，双击即用，数据随 exe 走
             - `AIVerse-Setup-*.exe` —— 安装版，开始菜单/桌面快捷方式，卸载不删项目与模型
+
+            > 本版具体改了什么，见仓库 README 的「九、更新日志」一节（下面还有自动生成的
+            > Full Changelog 链接）。体积数字与权重文件名都是对着 HuggingFace 上
+            > `Comfy-Org/MiniMax-H3` 的真实字节数核过的，不是估的。
