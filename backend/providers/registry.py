@@ -31,6 +31,9 @@ _BUILDERS = {
 }
 
 
+KINDS = ("llm", "image", "video", "tts")
+
+
 def _user_providers(kind: str) -> list:
     out = []
     for r in db.rows("SELECT * FROM providers WHERE type=? AND enabled=1 ORDER BY name", (kind,)):
@@ -83,6 +86,12 @@ def get_tts(provider_id: str | None = None) -> TTSProvider:
 
 def add(name: str, kind: str, base_url: str = "", api_key: str = "",
         models: list[str] | None = None, meta: dict | None = None) -> dict:
+    # 类型写错要当场拒绝。早先是照单收下：一条 type=bogus 的记录进了库，
+    # 但 list_providers 只遍历已知类型、_user_providers 里 KeyError 又被
+    # try/except 吞掉 —— 于是这个 Provider 在界面上**根本不存在**，
+    # 用户却收到「添加成功」。
+    if kind not in KINDS:
+        raise ValueError(f"未知的 Provider 类型：{kind}。可选：{'、'.join(KINDS)}")
     pid = db.new_id("pv_")
     db.run(
         "INSERT INTO providers(id,name,type,base_url,api_key,models,enabled,meta) VALUES(?,?,?,?,?,?,1,?)",
@@ -93,6 +102,8 @@ def add(name: str, kind: str, base_url: str = "", api_key: str = "",
 
 def update(pid: str, **fields) -> None:
     allowed = {"name", "type", "base_url", "api_key", "models", "enabled", "meta"}
+    if "type" in fields and fields["type"] not in KINDS:
+        raise ValueError(f"未知的 Provider 类型：{fields['type']}。可选：{'、'.join(KINDS)}")
     sets, args = [], []
     for k, v in fields.items():
         if k not in allowed:

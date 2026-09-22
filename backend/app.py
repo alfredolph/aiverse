@@ -191,15 +191,21 @@ class Api:
 
     @route("POST", r"/api/projects/(?P<pid>[\w\-]+)/stage/(?P<key>\w+)/reopen")
     def stage_reopen(self, m, body, q):
-        return 200, engine.reopen(m["pid"], m["key"])
+        # 默认级联：把下游阶段一并退回草稿（它们的输入已经变了）。
+        # 传 cascade=false 可以只改当前阶段状态（给「只想改个错别字」这类场景留口子）。
+        return 200, engine.reopen(m["pid"], m["key"],
+                                  cascade=bool((body or {}).get("cascade", True)))
 
     # ------------------------------------------------------------ 抽卡
     @route("GET", r"/api/projects/(?P<pid>[\w\-]+)/candidates")
     def cand_list(self, m, body, q):
+        # 两处默认值原本不一致（list 用 None、counts 用 "characters"），
+        # 不传 stage 时列表和计数对不上。统一解析一次。
+        stage = (q.get("stage") or [None])[0]
+        group = (q.get("group") or [None])[0]
         return 200, {
-            "candidates": gacha.list_candidates(m["pid"], q.get("stage", [None])[0],
-                                                q.get("group", [None])[0]),
-            "counts": gacha.group_counts(m["pid"], q.get("stage", ["characters"])[0]),
+            "candidates": gacha.list_candidates(m["pid"], stage, group),
+            "counts": gacha.group_counts(m["pid"], stage or "characters"),
         }
 
     @route("POST", r"/api/projects/(?P<pid>[\w\-]+)/gacha/draw")
@@ -301,32 +307,49 @@ class Api:
         opts = body or {}
         c = pipeline.ctx(pid)
 
+        # 入队之前先把参数校验掉。
+        # 早先不校验：only 里写了个不存在的镜号，任务照样排进去，跑到一半抛
+        # 「镜头 S005 不存在」，用户得去队列抽屉里翻半天才知道哪写错了；
+        # 而且那时是整批中断，前面已经生成的镜头白跑。
+        have = {s["no"] for s in shots.list_shots(pid)}
+        only = opts.get("only")
+        wanted: list[int] | None = None
+        if only:
+            try:
+                wanted = [int(n) for n in only]
+            except (TypeError, ValueError):
+                return 400, {"error": "only 必须是镜头号数组，例如 [1, 2]"}
+            missing = [n for n in wanted if n not in have]
+            if missing:
+                return 400, {"error": f"镜头不存在：{missing}（当前项目共 {len(have)} 个镜头）"}
+        if not have:
+            return 400, {"error": "还没有分镜，请先完成「分镜设计」阶段"}
+
         def job(progress):
             from .agents import VideoAgent
-            total = max(1, len(shots.list_shots(pid)))
-            done = 0
+            targets = wanted if wanted is not None else sorted(have)
+            total = max(1, len(targets))
+            done, generated, failed = 0, [], []
 
-            def step(no):
-                nonlocal done
-                res = VideoAgent(c).generate_shot(
-                    no,
-                    resolution=opts.get("resolution") or c.project.get("resolution") or "1080p",
-                    aspect=opts.get("aspect") or c.project.get("aspect") or "16:9",
-                    lock=opts.get("lock"), change=opts.get("change"), hint=opts.get("hint") or "",
-                )
+            for no in targets:
+                try:
+                    res = VideoAgent(c).generate_shot(
+                        no,
+                        resolution=opts.get("resolution") or c.project.get("resolution") or "1080p",
+                        aspect=opts.get("aspect") or c.project.get("aspect") or "16:9",
+                        lock=opts.get("lock"), change=opts.get("change"),
+                        hint=opts.get("hint") or "",
+                    )
+                    generated.append(res["no"])
+                except Exception as e:
+                    # 单个镜头炸了不该拖垮整批：记下来，继续跑剩下的
+                    failed.append({"no": no, "error": str(e)})
                 done += 1
                 progress(done / total)
-                return res
 
-            only = opts.get("only")
-            if only:
-                return [step(int(n)) for n in only]
-            out = []
-            for s in shots.list_shots(pid):
-                out.append(step(s["no"]))
             engine.set_status(pid, "video", STATUS["REVIEW"],
-                              {"generated": [x["no"] for x in out], "failed": []})
-            return out
+                              {"generated": generated, "failed": failed})
+            return {"generated": generated, "failed": failed, "count": len(generated)}
 
         tid = queue().submit(pid, "视频生成", "video", job, priority=int(opts.get("priority") or 5))
         return 200, {"ok": True, "task_id": tid}
@@ -596,14 +619,20 @@ class Api:
 
     @route("POST", r"/api/providers")
     def prov_add(self, m, body, q):
-        r = registry.add(body.get("name") or "新 Provider", body.get("type") or "llm",
-                         body.get("base_url") or "", body.get("api_key") or "",
-                         body.get("models") or [], body.get("meta") or {})
+        try:
+            r = registry.add(body.get("name") or "新 Provider", body.get("type") or "llm",
+                             body.get("base_url") or "", body.get("api_key") or "",
+                             body.get("models") or [], body.get("meta") or {})
+        except ValueError as e:
+            return 400, {"error": str(e)}
         return 200, {"ok": True, **r}
 
     @route("PATCH", r"/api/providers/(?P<pid>[\w\-]+)")
     def prov_update(self, m, body, q):
-        registry.update(m["pid"], **body)
+        try:
+            registry.update(m["pid"], **body)
+        except ValueError as e:
+            return 400, {"error": str(e)}
         return 200, {"ok": True}
 
     @route("DELETE", r"/api/providers/(?P<pid>[\w\-]+)")
@@ -640,20 +669,40 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_body(self):
+        """读 JSON 请求体。
+
+        早先 JSON 解析失败会静默返回 `{}` —— 客户端发了个坏 body，服务端当成
+        「空参数」照常处理：`POST /api/projects` 于是凭空建出一个「未命名项目」，
+        用户那边只看到请求成功。现在解析失败一律抛 ValueError，由 _dispatch
+        兜成 400，让错误停在边界上。
+        """
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
             return {}
         raw = self.rfile.read(n)
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except Exception:
+        if not raw.strip():
             return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise ValueError("请求体不是合法 JSON")
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return data
 
     def _dispatch(self, method: str) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
         q = urllib.parse.parse_qs(parsed.query)
-        body = self._read_body() if method in ("POST", "PATCH", "PUT", "DELETE") else {}
+        if method in ("POST", "PATCH", "PUT", "DELETE"):
+            try:
+                body = self._read_body()
+            except ValueError as e:
+                return self._send_json(400, {"error": str(e)})
+        else:
+            body = {}
 
         if path.startswith("/api/"):
             for rmethod, pattern, fname in ROUTES:

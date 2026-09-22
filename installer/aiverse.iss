@@ -3,7 +3,7 @@
 ;
 ;  前置：先执行  python build_exe.py  生成 dist\AIVerse.exe
 ;  编译：iscc installer\aiverse.iss     （或右键用 Inno Setup Compiler 打开）
-;  产物：installer\Output\AIVerse-Setup-1.0.4.exe
+;  产物：installer\Output\AIVerse-Setup-1.0.5.exe
 ;
 ;  说明：默认安装到 %LOCALAPPDATA%\Programs\AI Studio，
 ;        无需管理员权限，且用户数据目录可写。
@@ -19,7 +19,7 @@
 
 #define MyAppName "AI Studio"
 #define MyAppNameCN "AI 漫剧工厂"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "AIVerse"
 #define MyAppExeName "AIVerse.exe"
 

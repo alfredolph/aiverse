@@ -36,6 +36,9 @@ projects/
 /runtime/
 *.log
 
+# ---- 本地冒烟 / 探针临时目录 ----
+.smoke/
+
 # ---- 凭据（绝不入库）----
 .gh_token
 .gh_login

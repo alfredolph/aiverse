@@ -497,8 +497,11 @@ function renderWorkspace() {
 }
 
 function stageItem(s) {
-  const locked = s.status === 'DRAFT' && s.idx > 0 &&
-    (S.detail.stages[s.idx - 1].status !== 'APPROVED' && S.detail.stages[s.idx - 1].status !== 'FINAL');
+  // 与后端 gate() 对齐：检查**所有**上游阶段，不是只看紧邻那一个。
+  // 否则中间某段被「返回修改」之后，后面的阶段在侧栏里看起来仍是可点的。
+  const blocked = S.detail.stages.slice(0, s.idx)
+    .find((p) => p.status !== 'APPROVED' && p.status !== 'FINAL');
+  const locked = s.status === 'DRAFT' && !!blocked;
   const mark = (s.status === 'APPROVED' || s.status === 'FINAL') ? '✓'
     : (s.status === 'REVIEW' ? '!' : (s.idx + 1));
   return `<div class="stage ${S.stage === s.key ? 'active' : ''} ${locked ? 'locked' : ''}"
@@ -506,7 +509,7 @@ function stageItem(s) {
     <div class="dot">${mark}</div>
     <div class="stage-txt">
       <div class="stage-name">${esc(s.name)}</div>
-      <div class="stage-desc">${esc(statusLabel(s.status))}${locked ? ' · 需先通过上一阶段' : ''}</div>
+      <div class="stage-desc">${esc(statusLabel(s.status))}${locked ? ` · 需先通过「${esc(blocked.name)}」` : ''}</div>
     </div>
   </div>`;
 }
@@ -1133,8 +1136,24 @@ const ACTIONS = {
     await loadDetail(); await refreshStage(); toast('已驳回', 'warn');
   },
   async 'reopen-stage'(el) {
-    await api.post(`/api/projects/${S.pid}/stage/${el.dataset.key}/reopen`);
-    await loadDetail(); await refreshStage(); toast('已返回修改状态');
+    const key = el.dataset.key;
+    const stages = (S.detail && S.detail.stages) || [];
+    const idx = stages.findIndex((x) => x.key === key);
+    // 下游凡是已通过/已完成的，都会被后端级联退回草稿 —— 先讲清楚再动手。
+    const downstream = stages.slice(idx + 1)
+      .filter((x) => x.status === 'APPROVED' || x.status === 'FINAL');
+    if (downstream.length && !confirm(
+      `「返回修改」会把下游 ${downstream.length} 个阶段一并退回草稿：\n`
+      + `  ${downstream.map((x) => x.name).join('、')}\n\n`
+      + `因为它们都是基于这一阶段的产物生成的，改了这一段的输入，\n`
+      + `后面就得重做。产物文件会保留，只是不再算「已通过」。\n\n继续？`)) return;
+    const r = await api.post(`/api/projects/${S.pid}/stage/${key}/reopen`);
+    if (r && r.ok === false) return toast(r.error || '操作失败', 'bad');
+    const inv = (r && r.invalidated) || [];
+    await loadDetail(); await refreshStage();
+    toast(inv.length
+      ? `已返回修改，下游 ${inv.length} 个阶段一并退回草稿`
+      : '已返回修改状态');
   },
   async 'approve-all'(el) {
     await api.post(`/api/projects/${S.pid}/stage/${el.dataset.key}/approve_all`);
@@ -1171,7 +1190,9 @@ const ACTIONS = {
     if (r.ok === false) return toast(r.error, 'bad');
     await openGacha(el.dataset.stage, el.dataset.group);
     await loadDetail();
-    toast(`已采用方案 ${r.design?.name ? '' : ''}`, 'ok');
+    // 这里原本是 `已采用方案 ${r.design?.name ? '' : ''}` —— 三元两边都是空串，
+    // 弹出来永远是「已采用方案 」。改成用后端返回的实体名。
+    toast(r.name ? `已采用「${r.name}」的方案` : '已采用该方案', 'ok');
   },
   async 'gacha-adopt'(el) {
     if (!el.dataset.cid) return toast('暂无候选', 'warn');

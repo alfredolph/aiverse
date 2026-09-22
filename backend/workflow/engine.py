@@ -112,15 +112,23 @@ def merge_payload(project_id: str, key: str, patch: dict) -> dict:
 
 # ---------------------------------------------------------------- 审核门（文档 §48）
 def gate(project_id: str, key: str) -> dict[str, Any]:
-    """判断某阶段是否允许进入。"""
+    """判断某阶段是否允许进入。
+
+    检查**所有**上游阶段，而不是只看紧邻的那一个。
+    只看紧邻那一段是有洞的：把中间某段「返回修改」之后，它的下一段依旧
+    APPROVED，于是再往下的阶段照样能跑 —— 新产物其实建立在已经失效的资产上，
+    审核门等于没拦。这里逐个上游检查，任何一段没通过就挡住。
+    """
     idx = stage_index(key)
     if idx <= 0:
         return {"ok": True, "blocked_by": None}
-    prev_key = STAGES[idx - 1][0]
-    prev = get_stage(project_id, prev_key)
-    if prev and prev["status"] == STATUS["APPROVED"]:
-        return {"ok": True, "blocked_by": None}
-    return {"ok": False, "blocked_by": prev_key, "blocked_by_name": stage_name(prev_key)}
+    for i in range(idx):
+        prev_key = STAGES[i][0]
+        prev = get_stage(project_id, prev_key)
+        if not prev or prev["status"] not in (STATUS["APPROVED"], STATUS["FINAL"]):
+            return {"ok": False, "blocked_by": prev_key,
+                    "blocked_by_name": stage_name(prev_key)}
+    return {"ok": True, "blocked_by": None}
 
 
 def approve(project_id: str, key: str) -> dict[str, Any]:
@@ -140,10 +148,29 @@ def reject(project_id: str, key: str, reason: str = "") -> dict[str, Any]:
     return {"ok": True}
 
 
-def reopen(project_id: str, key: str) -> dict[str, Any]:
-    """返回上一阶段重新编辑（§3：任何阶段都可以返回）。"""
+def reopen(project_id: str, key: str, cascade: bool = True) -> dict[str, Any]:
+    """返回上一阶段重新编辑（§3：任何阶段都可以返回）。
+
+    关键语义：这一阶段的输入要改了，那么**所有下游**都是基于旧输入产出的，
+    必须一并作废。早先只把当前阶段改成 REVIEW，下游依旧一片 APPROVED ——
+    用户以为「只改一处」，实际后面每一段用的都是旧资产；而且因为审核门当时
+    只看紧邻一段，它连拦都拦不住。现在默认级联退回 DRAFT（保留产物，
+    只作废「已通过」这个状态），并在返回体里列出被作废的阶段。
+    """
+    idx = stage_index(key)
+    if idx < 0:
+        return {"ok": False, "error": f"未知阶段 {key}"}
+    invalidated: list[str] = []
+    if cascade:
+        for i in range(idx + 1, len(STAGES)):
+            k = STAGES[i][0]
+            st = get_stage(project_id, k)
+            if st and st["status"] != STATUS["DRAFT"]:
+                # payload 传 None：只改状态，产物留着，用户还能看到原来是什么
+                set_status(project_id, k, STATUS["DRAFT"])
+                invalidated.append(k)
     set_status(project_id, key, STATUS["REVIEW"])
-    return {"ok": True}
+    return {"ok": True, "invalidated": invalidated}
 
 
 def progress(project_id: str) -> dict[str, Any]:
