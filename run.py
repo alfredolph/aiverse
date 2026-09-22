@@ -22,7 +22,7 @@ if not getattr(sys, "frozen", False):
 
 from backend.app import serve                                    # noqa: E402
 from backend.core.config import (APP_CODE, APP_NAME, BASE_DIR,   # noqa: E402
-                                 HOST, PORT, VERSION)
+                                 DATA_DIR, HOST, PORT, RUNTIME_DIR, VERSION)
 from backend.gpu import detector as gpu                          # noqa: E402
 from backend.media import ffmpeg                                 # noqa: E402
 
@@ -56,6 +56,8 @@ def main() -> int:
     ap.add_argument("port", nargs="?", type=int, default=PORT, help="监听端口")
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     ap.add_argument("--host", default=HOST, help="监听地址（局域网用 0.0.0.0）")
+    ap.add_argument("--setup", action="store_true",
+                    help="启动后直接进入「环境部署」页（安装包首次运行用）")
     args = ap.parse_args()
 
     port = pick_port(args.host, args.port)
@@ -70,22 +72,26 @@ def main() -> int:
         top, rec, ff = {"name": "未知", "vram_gb": 0}, {"precision": "-", "resolution": "-", "offload": False}, {"available": False, "hint": "-"}
 
     url = f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{port}"
+    open_url = url + ("/?view=runtime" if args.setup else "")
 
     print(BANNER)
     print(f"  {APP_NAME} · {APP_CODE}  v{VERSION}")
     print("  " + "─" * 56)
-    print(f"  数据目录 : {BASE_DIR / 'projects'}")
+    print(f"  数据目录 : {DATA_DIR}")
+    print(f"  运行时   : {RUNTIME_DIR}")
     print(f"  GPU      : {top['name']}  ({top['vram_gb']} GB)   模式：{info.get('mode', '-') if isinstance(info, dict) else '-'}")
     print(f"  推荐配置 : {rec['precision']} / {rec['resolution']} / CPU Offload {'开' if rec['offload'] else '关'}")
-    print(f"  FFmpeg   : {'已就绪' if ff['available'] else '未安装（导出计划仍可生成）'}")
+    print(f"  FFmpeg   : {'已就绪' if ff['available'] else '未安装（可在「环境部署」里一键装）'}")
     print("  " + "─" * 56)
     print(f"  控制台   : {url}")
+    if args.setup:
+        print("  已进入   : 环境部署页（一键装本地推理环境）")
     print(f"  手机控制 : 局域网访问 http://<本机IP>:{port}")
     print("  退出     : 按 Ctrl+C 或直接关闭本窗口\n")
 
     httpd = serve(args.host, port)
     if not args.no_open:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: webbrowser.open(open_url)).start()
 
     try:
         httpd.serve_forever()

@@ -17,9 +17,10 @@ VERSION = "1.0.0-mvp"
 # 支持三种运行方式：
 #   1) 源码运行   ：aiverse/backend/core/config.py -> parents[2] == aiverse/
 #   2) 绿色版 exe ：PyInstaller 单文件，资源解包到 sys._MEIPASS，
-#                   用户数据写在 exe 同级 projects/（可随 U 盘带走）
-#   3) 安装版 exe ：装在 Program Files 等只读位置时，自动回退到
-#                   %LOCALAPPDATA%\AIVerse\projects，无需管理员权限
+#                   用户数据与运行时写在 exe 同级（可随 U 盘带走）
+#   3) 安装版 exe ：Inno Setup 会写入 aiverse.ini 作为标记，
+#                   数据与运行时统一放到 %LOCALAPPDATA%\AIVerse（无需管理员权限，
+#                   重装/升级不丢 30GB 模型）
 FROZEN = bool(getattr(sys, "frozen", False))
 
 
@@ -34,14 +35,33 @@ def _writable(p: Path) -> bool:
         return False
 
 
+def _local_root() -> Path:
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(local) / "AIVerse"
+
+
+def _installed_mode() -> bool:
+    """安装版标志：由 Inno Setup 在安装目录写入 aiverse.ini。
+
+    安装版把「项目数据 + 30GB 推理运行时」放到 %LOCALAPPDATA%\\AIVerse，
+    这样重装/升级不会丢模型，卸载也不会误删。
+    绿色版（直接拷 exe）则全部放在 exe 同级，可随 U 盘带走。
+    """
+    try:
+        return (BASE_DIR / "aiverse.ini").exists()
+    except Exception:
+        return False
+
+
 def _default_data_dir() -> Path:
     if not FROZEN:
         return BASE_DIR / "projects"
+    if _installed_mode():
+        return _local_root() / "projects"
     beside = BASE_DIR / "projects"
     if _writable(beside):
         return beside
-    local = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    return Path(local) / "AIVerse" / "projects"
+    return _local_root() / "projects"
 
 
 if FROZEN:
@@ -56,6 +76,20 @@ FRONTEND_DIR = BUNDLE_DIR / "frontend"
 DATA_DIR = Path(os.environ.get("AIVERSE_DATA") or _default_data_dir())
 DB_PATH = DATA_DIR / "aiverse.db"
 LOG_PATH = DATA_DIR / "aiverse.log"
+
+# 本地推理运行时（Python/CUDA/ComfyUI/H3 权重），体积可达 30GB+。
+# 绿色版：放在 exe 同级 runtime/，可整体迁移；
+# 安装版：放在 %LOCALAPPDATA%\AIVerse\runtime，重装不丢模型。
+# 可用环境变量 AIVERSE_RUNTIME 强制覆盖。
+def _default_runtime_dir() -> Path:
+    if not FROZEN:
+        return DATA_DIR.parent / "runtime"
+    if _installed_mode():
+        return _local_root() / "runtime"
+    return BASE_DIR / "runtime"
+
+
+RUNTIME_DIR = Path(os.environ.get("AIVERSE_RUNTIME") or _default_runtime_dir())
 
 # ---------------------------------------------------------------- 服务
 HOST = os.environ.get("AIVERSE_HOST", "127.0.0.1")

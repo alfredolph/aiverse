@@ -10,7 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
+import socket
 import struct
+import subprocess
+import tempfile
+import time
+import urllib.parse
+import urllib.request
 import wave
 from pathlib import Path
 
@@ -31,6 +38,38 @@ def _seed_of(text: str, seed: int | None = None) -> int:
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_PORT_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+def _port_open(url: str, timeout: float = 0.2, ttl: float = 3.0) -> bool:
+    """探测端口通不通（用于判断 ComfyUI 是否在跑）。
+
+    两个坑：
+      1. 有些 Windows 安全软件会让「连不上」的本地端口静默丢包，
+         而不是立刻返回 RST —— 所以超时必须给得很小（0.2s），
+         否则每个镜头都要白等一两秒。
+      2. 结果缓存 3 秒：一次生成要查几十次，别每次都真的去连。
+    """
+    now = time.time()
+    hit = _PORT_CACHE.get(url)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+
+    ok = False
+    try:
+        u = urllib.parse.urlparse(url)
+        host = u.hostname or "127.0.0.1"
+        port = u.port or 8188
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            ok = s.connect_ex((host, port)) == 0
+    except Exception:
+        ok = False
+
+    _PORT_CACHE[url] = (time.time(), ok)
+    return ok
 
 
 def _wrap(s: str, n: int = 14) -> list[str]:
@@ -128,26 +167,245 @@ class PlaceholderVideoProvider(VideoProvider):
 
 
 class H3ComfyUIProvider(VideoProvider):
-    """MiniMax H3（经 ComfyUI）Adapter —— 文档 §36 / §37 的执行引擎接口。
+    """MiniMax H3（经本地 ComfyUI）Adapter —— 文档 §36 / §37 的执行引擎接口。
 
-    真实接入方式：向本地 ComfyUI 的 /prompt 提交 H3 Ref2V 工作流，
-    轮询 /history 取结果，再下载到项目 videos/ 目录。此处给出接口骨架。
+    真实工作流：
+        1. 连本地 ComfyUI，读 /object_info 自动识别 H3 节点类名
+        2. 用 h3_workflows.build_graph() 生成 API 格式工作流
+        3. POST /prompt 提交，轮询 /history/{id} 等结果
+        4. 从 /view 拉回生成的 MP4（H3 同时产出音频轨）
+    未接通时抛错，由上层自动回退到占位 Provider，不会中断流程。
     """
 
     def __init__(self, id="video-h3", name="MiniMax H3 (ComfyUI)", base_url="http://127.0.0.1:8188",
                  api_key="", models=None, meta=None):
         super().__init__(id=id, name=name, base_url=base_url, api_key=api_key,
-                         models=models or ["h3-ref2v"], meta=meta)
+                         models=models or ["h3-fl2va", "h3-ref2va"], meta=meta)
+
+    def capabilities(self):
+        return ["text2video", "image2video", "ref2video", "native_audio"]
+
+    def cost(self):
+        return {"unit": "local_gpu", "price": 0.0}
+
+    def limits(self):
+        return {"native_resolution": "768p", "max_reference_images": 9,
+                "max_reference_videos": 3, "max_reference_audios": 3}
+
+    # ------------------------------------------------------------ 连接
+    def _api(self, path: str, data: dict | None = None, timeout: int = 30):
+        url = self.base_url.rstrip("/") + path
+        body = json.dumps(data).encode("utf-8") if data is not None else None
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"} if body else {},
+            method="POST" if body else "GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
 
     def health(self):
-        return {"ok": bool(self.base_url), "detail": self.base_url or "未配置 ComfyUI 地址"}
+        if not self.base_url:
+            return {"ok": False, "detail": "缺少 ComfyUI 地址"}
+        # 先用极短的 TCP 探测挡一道：ComfyUI 没开时直接返回，
+        # 避免每个镜头都白等一次 HTTP 超时。
+        if not _port_open(self.base_url):
+            return {"ok": False, "connected": False,
+                    "detail": f"ComfyUI 未在运行（{self.base_url}）—— "
+                              f"点「启动 ComfyUI」，或直接开始生成（会自动拉起）"}
+        try:
+            stats = self._api("/system_stats", timeout=4)
+            obj = self._api("/object_info", timeout=25)
+            from .h3_workflows import h3_available
+            info = h3_available(obj)
+            if not info["available"]:
+                return {"ok": False, "connected": True,
+                        "detail": "ComfyUI 已连接，但未检测到 H3 节点。请先安装 MiniMax H3 节点包",
+                        "comfyui": stats.get("system", {})}
+            return {"ok": True, "connected": True, "detail": "H3 节点就绪",
+                    "acceleration": info["acceleration"],
+                    "related_nodes": info["related_nodes"]}
+        except Exception as e:
+            return {"ok": False, "connected": True,
+                    "detail": f"无法连接 ComfyUI（{self.base_url}）：{e}"}
 
+    def node_map(self) -> dict:
+        """实时读取 ComfyUI 节点清单并自动映射；失败则用默认映射。"""
+        from .h3_workflows import DEFAULT_NODE_MAP, autodetect_node_map
+        try:
+            obj = self._api("/object_info", timeout=25)
+            detected = autodetect_node_map(obj, self.meta.get("node_map") or DEFAULT_NODE_MAP)
+            self.meta["node_map"] = detected
+            self.meta["object_info_count"] = len(obj)
+            return detected
+        except Exception:
+            return dict(self.meta.get("node_map") or DEFAULT_NODE_MAP)
+
+    # ------------------------------------------------------------ 自动拉起
+    def ensure_ready(self, wait_seconds: int = 120) -> bool:
+        """ComfyUI 没在跑就自动拉起（用部署器装的那一份）。
+
+        这样用户不需要先手动开 ComfyUI 再回来点生成 —— 少一步是一步。
+        """
+        if self.health().get("ok"):
+            return True
+        if not self._spawn_comfy():
+            return False
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            time.sleep(3)
+            if self.health().get("ok"):
+                return True
+        return False
+
+    def _spawn_comfy(self) -> bool:
+        try:
+            from ..core.config import RUNTIME_DIR
+        except Exception:
+            return False
+        main_py = RUNTIME_DIR / "comfyui" / "main.py"
+        venv_py = RUNTIME_DIR / "venv" / "Scripts" / "python.exe"
+        if not main_py.exists() or not venv_py.exists():
+            return False
+        # 已经在跑就别重复拉
+        if _port_open(self.base_url):
+            return True
+        try:
+            subprocess.Popen(
+                [str(venv_py), str(main_py), "--listen", "127.0.0.1", "--port", "8188"],
+                cwd=str(RUNTIME_DIR / "comfyui"),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return True
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------ 生成
     def generate(self, prompt, reference=None, seconds=5.0, resolution="720p",
-                 aspect="16:9", lock=None, seed=None):
-        raise RuntimeError(
-            "H3 Adapter 未接通：请启动本地 ComfyUI 并加载 H3 Ref2V 工作流，"
-            "然后在「设置 → Provider」中启用并填写地址。"
-        )
+                 aspect="16:9", lock=None, seed=None, **_extra):
+        if not self.base_url:
+            raise RuntimeError("H3 Adapter 未配置 ComfyUI 地址")
+
+        from .h3_workflows import build_graph
+
+        # 1) 健康检查（ComfyUI 没开就先自动拉起）+ 节点映射
+        if not self.ensure_ready():
+            h = self.health()
+            raise RuntimeError(h.get("detail") or "H3 未就绪：ComfyUI 未运行且无法自动启动")
+        nm = self.node_map()
+
+        # 2) 尺寸：H3-Base 原生 768p 级，按画幅换算
+        w, hh = _h3_size(aspect, resolution)
+        fps = int(self.meta.get("fps") or 24)
+        frames = max(25, int(round(seconds * fps / 4)) * 4 + 1)   # 视频模型常见的 4n+1
+
+        params = {
+            "prompt": prompt,
+            "negative": (self.meta.get("negative")
+                         or "blurry, low quality, deformed, watermark, text"),
+            "width": w, "height": hh, "frames": frames, "fps": fps,
+            "steps": int(self.meta.get("steps") or 50),
+            "cfg": float(self.meta.get("cfg") or 6.0),
+            "seed": int(seed if seed is not None else _seed_of(prompt) % 2 ** 31),
+            "precision": self.meta.get("precision") or "quantized",
+            "offload": bool(self.meta.get("offload", True)),
+            "model_name": self.meta.get("model_name") or "MiniMax-H3",
+            "filename_prefix": "aiverse/h3",
+        }
+        kind = "ref2va" if reference else "fl2va"
+        if reference:
+            params["reference"] = reference
+
+        graph = build_graph(kind, params, nm)
+
+        # 3) 提交
+        try:
+            resp = self._api("/prompt", {"prompt": graph, "client_id": "aiverse"})
+        except Exception as e:
+            raise RuntimeError(f"提交 ComfyUI 任务失败：{e}")
+        prompt_id = resp.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI 未返回 prompt_id：{str(resp)[:300]}")
+
+        # 4) 轮询
+        deadline = time.time() + int(self.meta.get("timeout_seconds") or 3600)
+        while time.time() < deadline:
+            time.sleep(2.5)
+            try:
+                hist = self._api(f"/history/{prompt_id}", timeout=20)
+            except Exception:
+                continue
+            entry = hist.get(prompt_id)
+            if not entry:
+                continue
+            status = entry.get("status", {})
+            if status.get("status_str") == "error":
+                msgs = [m for m in status.get("messages", []) if m[0] == "execution_error"]
+                raise RuntimeError(f"H3 执行报错：{str(msgs)[:400]}")
+            outputs = entry.get("outputs") or {}
+            files = _collect_video_outputs(outputs)
+            if files:
+                # 5) 取回文件
+                local = self._download(files[0], prompt_id)
+                return {
+                    "path": str(local), "video_path": str(local),
+                    "seed": params["seed"],
+                    "manifest": {
+                        "prompt": prompt, "reference": reference, "seconds": seconds,
+                        "resolution": f"{w}x{hh}", "aspect": aspect, "frames": frames,
+                        "fps": fps, "steps": params["steps"], "seed": params["seed"],
+                        "provider": self.name, "backend": "comfyui",
+                        "prompt_id": prompt_id, "variant": kind,
+                        "node_map": nm,
+                        "status": "rendered",
+                        "note": "由本地 ComfyUI + MiniMax H3 生成（原生 768p，含音频轨）",
+                    },
+                }
+        raise RuntimeError("H3 生成超时")
+
+    def _download(self, item: dict, prompt_id: str) -> Path:
+        q = urllib.parse.urlencode({
+            "filename": item.get("filename", ""),
+            "subfolder": item.get("subfolder", ""),
+            "type": item.get("type", "output"),
+        })
+        url = self.base_url.rstrip("/") + "/view?" + q
+        tmp = Path(tempfile.gettempdir()) / "aiverse_h3"
+        tmp.mkdir(parents=True, exist_ok=True)
+        dest = tmp / f"{prompt_id}_{item.get('filename', 'output.mp4')}"
+        with urllib.request.urlopen(url, timeout=180) as r, open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+        return dest
+
+
+def _h3_size(aspect: str, resolution: str) -> tuple[int, int]:
+    """H3-Base 原生 768p 级；按画幅给出宽高，长边按分辨率档位缩放。"""
+    long_edge = {"480p": 640, "720p": 832, "1080p": 1152, "2K": 1344, "4K": 1344}.get(resolution, 832)
+    ratio = {"16:9": 16 / 9, "9:16": 9 / 16, "3:4": 3 / 4, "1:1": 1.0}.get(aspect, 16 / 9)
+    if ratio >= 1:
+        w = long_edge
+        h = int(round(long_edge / ratio))
+    else:
+        h = long_edge
+        w = int(round(long_edge * ratio))
+    # 对齐到 32 的倍数，避免多数模型报错
+    w = max(256, w // 32 * 32)
+    h = max(256, h // 32 * 32)
+    return w, h
+
+
+def _collect_video_outputs(outputs: dict) -> list[dict]:
+    """从 ComfyUI history 的 outputs 里挑出视频文件。"""
+    exts = (".mp4", ".webm", ".mkv", ".mov", ".gif")
+    found: list[dict] = []
+    for _nid, out in (outputs or {}).items():
+        for key in ("videos", "gifs", "images", "video"):
+            for item in (out.get(key) or []):
+                if isinstance(item, dict) and str(item.get("filename", "")).lower().endswith(exts):
+                    found.append(item)
+    # 优先 mp4
+    found.sort(key=lambda x: 0 if str(x.get("filename", "")).lower().endswith(".mp4") else 1)
+    return found
 
 
 # ---------------------------------------------------------------- TTS

@@ -42,6 +42,9 @@ const S = {
   stats: {},
   busy: false,
   timer: null,
+  view: 'home',        // home | workspace | runtime
+  runtime: null,       // 环境部署状态
+  runtimePlan: null,
 };
 
 /* ---------------------------------------------------------------- Toast */
@@ -70,8 +73,12 @@ async function boot() {
       <div class="boot-text">后端未连接：${esc(e.message)}<br/>请通过 <b>python run.py</b> 启动本地服务后刷新。</div></div>`;
     return;
   }
+  // 安装包首次运行 / 桌面「一键部署」快捷方式：直接落在环境部署页
+  const q = new URLSearchParams(location.search);
+  if (q.get('view') === 'runtime') S.view = 'runtime';
   await loadProjects();
   render();
+  if (S.view === 'runtime') await loadRuntime();
 }
 
 async function loadProjects() {
@@ -89,6 +96,7 @@ async function loadDetail() {
 
 /* ================================================================ RENDER */
 function render() {
+  if (S.view === 'runtime') return renderRuntime();
   if (!S.pid) return renderHome();
   return renderWorkspace();
 }
@@ -127,7 +135,8 @@ function renderHome() {
         ${capRow('成本统计', '本地算力 + 云端费用', '✓')}
       </div>
       <div class="side-foot">
-        <button class="btn sm" data-act="open-settings">⚙ 设置</button>
+        <button class="btn sm primary" data-act="open-runtime">⚡ 环境部署</button>
+        <button class="btn sm ghost" data-act="open-settings">⚙ 设置</button>
       </div>
     </aside>
     <div class="main">
@@ -144,6 +153,7 @@ function renderHome() {
             <p>共 ${S.projects.length} 个项目 · 数据全部保存在本地 projects/ 目录</p>
           </div>
         </div>
+        ${deployBanner()}
         ${cards}
       </div>
     </div>
@@ -188,6 +198,243 @@ function ffmpegBadge() {
   return `<span class="badge ${f.available ? 'ok' : 'warn'}" title="${esc(f.hint)}">FFmpeg <b>${f.available ? '就绪' : '未安装'}</b></span>`;
 }
 
+function deployBanner() {
+  const r = S.runtime;
+  if (!r) return '';
+  const inst = r.installed || {};
+  const ready = inst.h3_weights && inst.comfyui && inst.torch;
+  const gpu = ((S.meta && S.meta.gpu && S.meta.gpu.gpus) || [])[0] || {};
+  if (ready) {
+    return `<div class="card" style="margin-bottom:14px;border-color:rgba(47,191,122,.35)">
+      <div class="card-h"><h3>本地推理环境已就绪</h3>
+        <span class="chip ok">H3 可本地出片</span>
+        <div class="spacer" style="flex:1"></div>
+        <button class="btn sm ghost" data-act="open-runtime">查看部署详情</button></div>
+      <div class="hint">显卡 ${esc(gpu.name || '未知')} · 运行时占用 ${r.disk_used_gb || 0} GB ·
+        ComfyUI ${inst.comfy_running ? '运行中' : '未运行（生成时自动拉起）'}</div>
+    </div>`;
+  }
+  const running = r.running || r.status === 'running';
+  const done = Object.values(r.steps || {}).filter((s) => s.status === 'done').length;
+  const total = Object.keys(r.steps || {}).length;
+  return `<div class="card" style="margin-bottom:14px;border-color:rgba(79,140,255,.35)">
+    <div class="card-h"><h3>${running ? '正在部署本地推理环境' : '还没有本地推理环境'}</h3>
+      ${running ? `<span class="chip warn">${done}/${total} 步完成</span>` : ''}
+      <div class="spacer" style="flex:1"></div>
+      <button class="btn sm primary" data-act="open-runtime">${running ? '查看进度' : '⚡ 一键部署'}</button></div>
+    <div class="hint">
+      本客户端只负责编排，所以本体很小。真正出片的 <b>MiniMax H3</b> 是 33B 参数模型，
+      量化版权重 <b>26.4 GB</b>，加上 PyTorch/CUDA 约 2.5 GB —— 这部分不可能塞进安装包。
+      点「一键部署」，程序会自动装好全部依赖与权重（含 FFmpeg），之后就能用你的显卡本地出片。
+      不方便联网的话，也可以用<b>离线包导入</b>，零下载复制。
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- 环境部署 */
+function renderRuntime() {
+  const r = S.runtime || {};
+  const inst = r.installed || {};
+  const plan = S.runtimePlan || (r.plan || null);
+  const steps = plan ? plan.steps : [];
+  const stateSteps = r.steps || {};
+  const running = r.running || r.status === 'running';
+
+  const check = (ok, label, extra = '') =>
+    `<div class="dep-item ${ok ? 'ok' : ''}">
+       <span class="dep-dot">${ok ? '✓' : '○'}</span>
+       <div><div class="dep-name">${esc(label)}</div>
+       ${extra ? `<div class="dep-sub">${esc(extra)}</div>` : ''}</div>
+     </div>`;
+
+  const h3 = S.h3 || null;
+
+  return `
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="brand-mark">AI</div>
+          <div><div class="brand-name">AI Studio</div><div class="brand-sub">AIVerse</div></div>
+        </div>
+      </div>
+      <div class="proj">
+        <div class="proj-name">环境部署</div>
+        <div class="proj-meta">本地推理运行时（H3）</div>
+      </div>
+      <div class="stages">
+        <div class="stages-title">说明</div>
+        <div class="hint" style="margin:4px 8px">
+          AIVerse 本体只有 <b>9.4 MB</b>，因为它只负责「编排」——
+          剧本、角色、分镜、审核、抽卡、剪辑。
+          <br/><br/>
+          真正出片的算力在 <b>MiniMax H3</b>：33B 参数、量化版 <b>26.4 GB</b> 权重，
+          再加 PyTorch/CUDA 约 2.5 GB。这些不可能塞进一个 9 MB 的 exe，
+          全球所有 AI 桌面应用（含 ComfyUI Desktop / Pinokio / EZlaunch）都是首次运行下载。
+          <br/><br/>
+          所以这里的做法是：<b>装一次，点一下，剩下的全自动</b>。
+        </div>
+      </div>
+      <div class="side-foot">
+        <button class="btn sm ghost" data-act="back-home">← 项目列表</button>
+        <button class="btn sm ghost" data-act="open-settings">⚙ 设置</button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <div class="crumb">环境部署 <span class="sep">/</span> <span class="cur">本地 H3 推理运行时</span></div>
+        <div class="spacer"></div>
+        <span class="badge ${inst.h3_weights ? 'ok' : 'warn'}">H3 权重 <b>${inst.h3_weights ? '就绪' : '未就绪'}</b></span>
+        <span class="badge ${inst.comfy_running ? 'ok' : ''}">ComfyUI <b>${inst.comfy_running ? '运行中' : '未运行'}</b></span>
+        <button class="btn sm ghost" data-act="refresh-runtime">刷新</button>
+      </div>
+
+      <div class="work">
+        <div class="head">
+          <div>
+            <h1>一键部署本地 H3 生产环境</h1>
+            <p>自动完成 Python / PyTorch+CUDA / ComfyUI / H3 权重 / FFmpeg 的全部安装，装完即可本地出片</p>
+          </div>
+          <div class="head-actions">
+            ${running
+              ? `<button class="btn danger" data-act="runtime-cancel">■ 取消部署</button>`
+              : `<button class="btn primary" data-act="runtime-install">⚡ 开始一键部署</button>`}
+            <button class="btn" data-act="h3-check">🩺 检测 H3 环境</button>
+            <button class="btn ghost" data-act="comfy-start">▶ 启动 ComfyUI</button>
+          </div>
+        </div>
+
+        ${r.status === 'failed' ? `<div class="card" style="border-color:rgba(255,93,108,.45)">
+          <div class="card-h"><h3 style="color:#ffa9b3">部署失败</h3>
+            <div class="spacer" style="flex:1"></div>
+            <button class="btn sm" data-act="runtime-retry">↻ 重试</button></div>
+          <div class="mono">${esc(r.error || '')}</div></div>` : ''}
+
+        <div class="grid g2">
+          <div class="card">
+            <div class="card-h"><h3>硬件检测</h3>
+              <span class="chip ${plan && plan.can_local ? 'ok' : 'warn'}">
+                ${plan ? esc(plan.tier.tier) : '—'} 档</span></div>
+            ${plan ? `
+            <table><tbody>
+              <tr><td>显卡</td><td><b>${esc(plan.gpu.name)}</b> · ${plan.gpu.vram_gb} GB</td></tr>
+              <tr><td>驱动</td><td>${esc(plan.gpu.driver || '—')}</td></tr>
+              <tr><td>内存 / 磁盘可用</td><td>${plan.system.ram_gb} GB / ${plan.system.disk_free_gb} GB</td></tr>
+              <tr><td>推荐模型</td><td><b>${esc(plan.model_name)}</b></td></tr>
+              <tr><td>部署建议</td><td>${esc(plan.tier.note)}</td></tr>
+            </tbody></table>` : '<div class="hint">正在读取硬件信息…</div>'}
+          </div>
+
+          <div class="card">
+            <div class="card-h"><h3>当前安装状态</h3></div>
+            <div class="dep-grid">
+              ${check(inst.uv, 'uv 运行时管理器')}
+              ${check(inst.python, 'Python 隔离环境')}
+              ${check(inst.torch, 'PyTorch + CUDA')}
+              ${check(inst.comfyui, 'ComfyUI 执行引擎')}
+              ${check(inst.ffmpeg, 'FFmpeg')}
+              ${check(inst.h3_weights, 'MiniMax H3 权重', inst.h3_weights ? '' : '约 26.4 GB')}
+            </div>
+            <div class="hint" style="margin-top:12px">
+              运行时目录：<span class="mono">${esc(r.runtime_dir || '')}</span>
+              ${r.disk_used_gb ? ` · 已占用 <b>${r.disk_used_gb} GB</b>` : ''}
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3>部署计划</h3>
+            <span class="sub">按你的显卡自动生成</span>
+            <div class="spacer" style="flex:1"></div>
+            <select class="inp" style="width:auto" id="rt-mirror" data-act="plan-change">
+              <option value="cn" ${plan && plan.mirror === 'cn' ? 'selected' : ''}>国内加速（ModelScope / 清华源）</option>
+              <option value="global" ${plan && plan.mirror === 'global' ? 'selected' : ''}>海外直连（HuggingFace）</option>
+            </select>
+            <select class="inp" style="width:auto" id="rt-model" data-act="plan-change">
+              ${(S.runtimeModels || []).map((m) => `<option value="${m.key}" ${plan && plan.model === m.key ? 'selected' : ''}>${esc(m.name)} · ${m.size_gb}GB</option>`).join('') || '<option>—</option>'}
+            </select>
+          </div>
+
+          ${plan ? `
+          <div class="stats" style="margin-bottom:14px">
+            ${stat(plan.total_download_human, '需下载总量')}
+            ${stat(plan.estimated_minutes + ' 分钟', '预计下载耗时')}
+            ${stat(steps.length, '部署步骤')}
+            ${stat(plan.can_local ? '本地出片' : '仅云端', '部署后能力')}
+          </div>
+          ${plan.warnings.map((w) => `<div class="hint" style="margin-bottom:8px">⚠ ${esc(w)}</div>`).join('')}
+          <table><thead><tr><th style="width:26px"></th><th>步骤</th><th style="width:96px">体积</th>
+            <th style="width:230px">进度</th><th style="width:74px">状态</th></tr></thead><tbody>
+            ${steps.map((s) => {
+              const st = stateSteps[s.key] || {};
+              const status = st.status || (s.optional ? 'optional' : 'pending');
+              const pct = status === 'done' ? 100 : (st.percent || 0);
+              const chip = { done: 'ok', running: 'warn', failed: 'bad', pending: 'grey',
+                             skipped: 'grey', optional: 'grey' }[status] || 'grey';
+              return `<tr>
+                <td>${status === 'done' ? '✓' : (status === 'running' ? '<span class="loading"></span>' : '○')}</td>
+                <td><b>${esc(s.name)}</b>${s.optional ? ' <span class="chip grey">可选</span>' : ''}
+                  <div class="dep-sub">${esc(st.message || s.desc)}</div></td>
+                <td>${esc(s.size_human)}</td>
+                <td><div class="pbar"><i style="width:${pct}%"></i></div>
+                  <div class="dep-sub">${st.speed_mbps ? st.speed_mbps + ' MB/s' : ''} ${pct ? pct.toFixed(1) + '%' : ''}</div></td>
+                <td><span class="chip ${chip}">${esc(status)}</span></td>
+              </tr>`;
+            }).join('')}
+          </tbody></table>` : '<div class="hint">正在生成部署计划…</div>'}
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3>离线包（完全不用下载）</h3>
+            <span class="sub">一台机器装好 → 拷 U 盘 → 其他机器直接导入</span></div>
+          <div class="hint" style="margin-bottom:12px">
+            如果这台机器不方便长时间联网，或者你要给多台机器装，可以走这条路：
+            先在任意一台机器上完成一次部署（或直接下载我们发布的离线包），
+            之后所有机器都<b>只复制文件、零下载</b>。
+          </div>
+          <div class="grid g2">
+            <div class="field">
+              <label>导入：把离线包路径粘进来</label>
+              <input class="inp" id="rt-offline-src" placeholder="D:\AIVerse-Runtime 或 \\NAS\share\AIVerse-Runtime" />
+              <div style="margin-top:8px;display:flex;gap:8px">
+                <button class="btn primary sm" data-act="offline-import">📥 导入离线运行时</button>
+                <button class="btn sm ghost" data-act="offline-verify">校验目录</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>导出：把本机运行时打包给别人</label>
+              <input class="inp" id="rt-offline-dest" placeholder="E:\  （导出到该目录下的 AIVerse-Runtime）" />
+              <div style="margin-top:8px">
+                <button class="btn sm" data-act="offline-export">📦 导出离线包</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        ${h3 ? `<div class="card">
+          <div class="card-h"><h3>H3 环境检测</h3>
+            <span class="chip ${h3.ok ? 'ok' : 'bad'}">${h3.ok ? '就绪' : '未就绪'}</span></div>
+          <div class="hint">${esc(h3.detail || '')}</div>
+          ${h3.acceleration ? `<div style="margin-top:9px">
+            加速节点：SageAttention <b>${h3.acceleration.sage_attention ? '已装' : '未装'}</b> ·
+            EasyCache <b>${h3.acceleration.easy_cache ? '已装' : '未装'}</b></div>` : ''}
+          ${h3.related_nodes && h3.related_nodes.length ? `<div style="margin-top:9px">
+            检测到 H3 相关节点：${h3.related_nodes.map((n) => `<span class="chip" style="margin:2px">${esc(n)}</span>`).join('')}
+            <button class="btn xs ghost" style="margin-left:6px" data-act="h3-detect-nodes">自动识别并写入节点映射</button></div>` : ''}
+        </div>` : ''}
+
+        <div class="card">
+          <div class="card-h"><h3>部署日志</h3>
+            <div class="spacer" style="flex:1"></div>
+            <span class="sub">${(r.log || []).length} 行</span></div>
+          <pre class="mono" style="max-height:280px;overflow:auto;background:#0c1220;border:1px solid var(--line);border-radius:9px;padding:12px">${esc((r.log || []).slice(-80).join('\n') || '（暂无日志）')}</pre>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 /* ---------------------------------------------------------------- Workspace */
 function renderWorkspace() {
   const d = S.detail;
@@ -217,8 +464,8 @@ function renderWorkspace() {
         ${stages.map(stageItem).join('')}
       </div>
       <div class="side-foot">
+        <button class="btn sm ghost" data-act="open-runtime">⚡ 环境部署</button>
         <button class="btn sm ghost" data-act="back-home">← 项目列表</button>
-        <button class="btn sm ghost" data-act="open-settings">⚙ 设置</button>
       </div>
     </aside>
 
@@ -1037,6 +1284,98 @@ const ACTIONS = {
     S.meta = await api.get('/api/meta'); openSettings(); toast('已删除', 'ok');
   },
 
+  // ---- 环境部署 ----
+  async 'open-runtime'() {
+    S.view = 'runtime';
+    render();
+    await loadRuntime();
+  },
+  async 'refresh-runtime'() { await loadRuntime(); toast('已刷新', 'ok'); },
+  async 'runtime-install'() {
+    const plan = S.runtimePlan;
+    if (!confirm(`即将下载约 ${plan ? plan.total_download_human : '未知'} 的运行时与模型权重。\n\n` +
+      `目标目录：${S.runtime?.runtime_dir || ''}\n` +
+      `预计耗时：约 ${plan ? plan.estimated_minutes : '?'} 分钟（取决于网速）\n\n` +
+      `过程中可随时取消，已下载部分会保留，下次可续传。\n确认开始？`)) return;
+    const r = await api.post('/api/runtime/install', {
+      mirror: S.runtimePlan?.mirror || 'cn',
+      model: S.runtimePlan?.model || null,
+      nodes: true,
+    });
+    if (r.ok === false) return toast(r.error, 'bad');
+    toast('部署已开始，可离开此页面，后台会继续', 'ok');
+    S.drawerOpen = false;
+    pollRuntime();
+  },
+  async 'runtime-cancel'() {
+    await api.post('/api/runtime/cancel');
+    toast('已发送取消指令', 'warn');
+    setTimeout(loadRuntime, 800);
+  },
+  async 'runtime-retry'() {
+    const r = await api.post('/api/runtime/retry');
+    if (r.ok === false) return toast(r.error, 'bad');
+    toast('已重新开始', 'ok');
+    pollRuntime();
+  },
+  async 'plan-change'() {
+    const mirror = ($('#rt-mirror') || {}).value || 'cn';
+    const model = ($('#rt-model') || {}).value || '';
+    const r = await api.get(`/api/runtime/plan?mirror=${mirror}&model=${encodeURIComponent(model)}`);
+    S.runtimePlan = r.plan;
+    S.runtimeModels = Object.entries(r.models).map(([k, v]) => ({ key: k, ...v }));
+    render();
+  },
+  async 'h3-check'() {
+    const r = await api.get('/api/runtime/h3');
+    S.h3 = r;
+    toast(r.ok ? 'H3 环境就绪' : (r.detail || 'H3 未就绪'), r.ok ? 'ok' : 'warn', 5000);
+    render();
+  },
+  async 'h3-detect-nodes'() {
+    const r = await api.post('/api/runtime/h3/detect-nodes', {});
+    if (r.ok === false) return toast(r.error, 'bad');
+    toast('已写入节点映射', 'ok');
+    S.h3 = await api.get('/api/runtime/h3');
+    render();
+  },
+  async 'comfy-start'() {
+    const r = await api.post('/api/runtime/comfy/start', {});
+    if (r.ok === false) return toast(r.error, 'bad');
+    toast(r.message, 'ok');
+    setTimeout(async () => { S.h3 = await api.get('/api/runtime/h3'); render(); }, 20000);
+  },
+  async 'offline-import'() {
+    const el = $('#rt-offline-src');
+    const src = (el && el.value || '').trim();
+    if (!src) return toast('请先填写离线包路径', 'warn');
+    if (!confirm(`将从以下目录复制运行时（不联网）：\n${src}\n\n` +
+      `目标：${S.runtime?.runtime_dir || ''}\n` +
+      `约 30 GB，耗时取决于硬盘速度。确认开始？`)) return;
+    const r = await api.post('/api/runtime/import', { source: src });
+    if (r.ok === false) return toast(r.error, 'bad', 8000);
+    toast('开始导入，可离开此页面', 'ok');
+    pollRuntime();
+  },
+  async 'offline-verify'() {
+    const el = $('#rt-offline-src');
+    const src = (el && el.value || '').trim();
+    if (!src) return toast('请先填写离线包路径', 'warn');
+    const r = await api.post('/api/runtime/import/verify', { source: src });
+    if (r.ok === false) return toast(r.error, 'bad', 8000);
+    toast(`校验通过：${r.found.join(' / ')} · ${r.size_gb} GB`, 'ok', 6000);
+  },
+  async 'offline-export'() {
+    const el = $('#rt-offline-dest');
+    const dest = (el && el.value || '').trim();
+    if (!dest) return toast('请先填写导出目录', 'warn');
+    toast('正在导出，大文件复制请耐心等待…', 'warn', 6000);
+    const r = await api.post('/api/runtime/export', { dest });
+    if (r.ok === false) return toast(r.error, 'bad', 8000);
+    toast(`导出完成：${r.path}（${r.size_gb} GB）`, 'ok', 8000);
+    await loadRuntime();
+  },
+
   'close-modal'() { closeModal(); },
   'mask-close'(el, ev) { if (ev.target === el) closeModal(); },
 };
@@ -1055,6 +1394,40 @@ async function refreshStage() {
   if (S.stage === 'scenes') {
     const g = $('#scene-grid'); if (g) await hydrateCharCards(g, 'scene');
   }
+}
+
+/* ---------------------------------------------------------------- runtime loaders */
+async function loadRuntime() {
+  try {
+    const [status, planRes] = await Promise.all([
+      api.get('/api/runtime/status'),
+      api.get('/api/runtime/plan?mirror=cn'),
+    ]);
+    S.runtime = status;
+    if (!S.runtimePlan) S.runtimePlan = planRes.plan;
+    S.runtimeModels = Object.entries(planRes.models).map(([k, v]) => ({ key: k, ...v }));
+    if (S.view === 'runtime') render();
+    if (status.running) pollRuntime();
+  } catch (e) {
+    toast('读取部署状态失败：' + e.message, 'bad');
+  }
+}
+
+let _rtTimer = null;
+function pollRuntime() {
+  if (_rtTimer) return;
+  _rtTimer = setInterval(async () => {
+    try {
+      const st = await api.get('/api/runtime/status');
+      S.runtime = st;
+      if (S.view === 'runtime') render();
+      if (!st.running && st.status !== 'running') {
+        clearInterval(_rtTimer); _rtTimer = null;
+        if (st.status === 'done') toast('本地推理环境部署完成，可以开始出片了', 'ok', 6000);
+        if (st.status === 'failed') toast('部署失败：' + (st.error || ''), 'bad', 9000);
+      }
+    } catch (e) { /* ignore */ }
+  }, 2000);
 }
 
 let _pollTimer = null;
@@ -1081,11 +1454,23 @@ async function poll() {
 document.addEventListener('click', async (ev) => {
   const el = ev.target.closest('[data-act]');
   if (!el) return;
+  // 下拉框交给 change 事件处理：点击时原生下拉不该被 preventDefault 打断，
+  // 而且点击瞬间读到的还是旧值。
+  if (el.tagName === 'SELECT') return;
   if (el.closest('[data-stop]') && el.dataset.act === 'mask-close') return;
   const fn = ACTIONS[el.dataset.act];
   if (!fn) return;
   ev.preventDefault();
   ev.stopPropagation();
+  try { await fn(el, ev); }
+  catch (e) { toast('操作失败：' + e.message, 'bad', 5000); }
+}, true);
+
+document.addEventListener('change', async (ev) => {
+  const el = ev.target.closest && ev.target.closest('select[data-act]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.act];
+  if (!fn) return;
   try { await fn(el, ev); }
   catch (e) { toast('操作失败：' + e.message, 'bad', 5000); }
 }, true);

@@ -23,17 +23,28 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Build AIVerse.exe
         run: python build_exe.py
 
-      - name: Smoke test
+      - name: Smoke test（后端 API + 前端渲染）
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist/AIVerse.exe -ArgumentList '--no-open','8799' -PassThru
-          Start-Sleep -Seconds 6
+          Start-Sleep -Seconds 8
           try {
-            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/health' -UseBasicParsing -TimeoutSec 10
-            Write-Host "health -> $($r.StatusCode) $($r.Content)"
+            $h = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/health' -UseBasicParsing -TimeoutSec 15
+            Write-Host "health -> $($h.StatusCode) $($h.Content)"
+            $s = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/runtime/status' -UseBasicParsing -TimeoutSec 15
+            Write-Host "runtime/status -> $($s.StatusCode)"
+            $pl = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/api/runtime/plan?mirror=cn' -UseBasicParsing -TimeoutSec 30
+            Write-Host "runtime/plan -> $($pl.StatusCode)"
+            node tools/ui_smoke.js http://127.0.0.1:8799
+            if ($LASTEXITCODE -ne 0) { throw "前端渲染冒烟测试失败" }
           } finally {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }

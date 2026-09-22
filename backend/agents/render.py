@@ -5,6 +5,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from ..core import store
@@ -62,17 +66,72 @@ def render_video(ctx, rel_dir: str, shot_no: int, prompt: str, reference: str | 
 
     poster_rel = f"{rel_dir}/S{shot_no:03d}_poster.svg"
     manifest_rel = f"{rel_dir}/S{shot_no:03d}.json"
-    if res.get("svg"):
+    manifest = dict(res.get("manifest") or {"prompt": prompt, "provider": prov.name})
+
+    # 真实 Provider 产出的视频：拷进项目目录
+    video_rel = None
+    src = res.get("video_path") or (res.get("path") if not res.get("svg") else None)
+    if src and not fallback_used:
+        ext = os.path.splitext(str(src))[1] or ".mp4"
+        video_rel = f"{rel_dir}/S{shot_no:03d}{ext}"
+        try:
+            dst = store.resolve(ctx.pid) / video_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            manifest["video"] = video_rel
+            manifest["status"] = "rendered"
+            # 用 ffmpeg 抽一帧做封面，失败就退回占位海报
+            if not extract_poster(dst, store.resolve(ctx.pid) / poster_rel):
+                _placeholder_poster(ctx, poster_rel, prompt, resolution, aspect, seconds,
+                                    res.get("seed") or 0, tag="已渲染 · 封面提取失败")
+        except Exception as e:
+            note = (note + f" / 拷贝视频失败：{e}").strip(" /")
+            video_rel = None
+
+    if not video_rel and res.get("svg"):
         store.write_text(ctx.pid, poster_rel, res["svg"])
-    manifest = res.get("manifest") or {"prompt": prompt, "provider": prov.name}
-    manifest["poster"] = poster_rel
+
+    manifest.setdefault("poster", poster_rel)
     manifest["fallback"] = fallback_used
-    manifest["note"] = note
+    if note:
+        manifest["note"] = note
     store.write_json(ctx.pid, manifest_rel, manifest)
 
-    return {"poster": poster_rel, "manifest": manifest_rel, "seed": res.get("seed"),
-            "provider": prov.name, "fallback": fallback_used, "note": note,
-            "status": manifest.get("status", "placeholder")}
+    return {"poster": poster_rel, "manifest": manifest_rel, "video": video_rel,
+            "seed": res.get("seed"), "provider": prov.name, "fallback": fallback_used,
+            "note": note, "status": manifest.get("status", "placeholder")}
+
+
+def extract_poster(video: Path, dest: Path) -> bool:
+    """用 ffmpeg 从视频抽第 1 帧做封面。没有 ffmpeg 就返回 False。"""
+    from ..media import ffmpeg as ff
+    exe = ff.ffmpeg_path()
+    if not exe or not video.exists():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            [str(exe), "-y", "-ss", "0.5", "-i", str(video), "-frames:v", "1",
+             "-vf", "scale=1024:-2", str(dest.with_suffix(".png"))],
+            capture_output=True, timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if r.returncode == 0 and dest.with_suffix(".png").exists():
+            dest.with_suffix(".png").replace(dest)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _placeholder_poster(ctx, rel: str, prompt: str, resolution: str, aspect: str,
+                        seconds: float, seed: int, tag: str) -> None:
+    from ..providers.media import PlaceholderVideoProvider
+    res = PlaceholderVideoProvider().generate(prompt, seconds=seconds,
+                                              resolution=resolution, aspect=aspect, seed=seed)
+    svg = (res.get("svg") or "").replace("分镜海报（待渲染）", tag)
+    if svg:
+        store.write_text(ctx.pid, rel, svg)
 
 
 def render_voice(ctx, rel_path: str, text: str, voice: str = "default") -> dict[str, Any]:

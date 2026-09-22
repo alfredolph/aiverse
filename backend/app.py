@@ -329,8 +329,153 @@ class Api:
     @route("POST", r"/api/projects/(?P<pid>[\w\-]+)/export")
     def export(self, m, body, q):
         p = projects.get(m["pid"])
-        plan = ffmpeg.build_export_plan(p, shots.list_shots(m["pid"]), body or {})
-        return 200, {"ok": True, "plan": plan}
+        result = ffmpeg.run_export(p, shots.list_shots(m["pid"]), body or {})
+        return 200, {"ok": True, "plan": result}
+
+    # ------------------------------------------------------------ 环境部署（本地 H3）
+    @route("GET", r"/api/runtime/status")
+    def runtime_status(self, m, body, q):
+        from .runtime.installer import installer
+        return 200, installer().status()
+
+    @route("GET", r"/api/runtime/plan")
+    def runtime_plan(self, m, body, q):
+        from .runtime import catalog, planner
+        mirror = q.get("mirror", ["cn"])[0]
+        model = q.get("model", [None])[0]
+        nodes = q.get("nodes", [None])[0]
+        return 200, {
+            "plan": planner.build_plan(
+                mirror=mirror, model_key=model or None,
+                include_nodes=(None if nodes is None else nodes == "1"),
+            ),
+            "mirrors": {k: v["name"] for k, v in catalog.MIRRORS.items()},
+            "models": {k: {"name": v["name"], "size_gb": v["size_gb"],
+                           "min_vram": v["min_vram"], "desc": v["desc"]}
+                       for k, v in catalog.MODEL_REPOS.items()},
+            "deps": catalog.RUNTIME_DEPS,
+        }
+
+    @route("POST", r"/api/runtime/install")
+    def runtime_install(self, m, body, q):
+        from .runtime.installer import installer
+        return 200, installer().start(
+            mirror=body.get("mirror") or "cn",
+            model_key=body.get("model"),
+            include_nodes=body.get("nodes"),
+        )
+
+    @route("POST", r"/api/runtime/cancel")
+    def runtime_cancel(self, m, body, q):
+        from .runtime.installer import installer
+        return 200, installer().cancel()
+
+    @route("POST", r"/api/runtime/retry")
+    def runtime_retry(self, m, body, q):
+        from .runtime.installer import installer
+        return 200, installer().retry_failed()
+
+    @route("GET", r"/api/runtime/h3")
+    def runtime_h3(self, m, body, q):
+        """H3 Provider 健康检查：ComfyUI 是否在跑、H3 节点是否就绪。
+
+        优先检查 H3 Adapter（id=video-h3），而不是当前生效的占位 Provider，
+        这样用户还没接通时也能看到「差在哪一步」。
+        """
+        from .providers import registry
+        p = registry.get("video", "video-h3") or registry.get("video")
+        active = registry.get("video")
+        detail = p.health() if hasattr(p, "health") else {"ok": False, "detail": "无视频 Provider"}
+        return 200, {
+            "provider": p.name if p else None,
+            "provider_id": p.id if p else None,
+            "type": p.type if p else None,
+            "active": active.name if active else None,
+            "is_active": bool(p and active and p.id == active.id),
+            "base_url": p.base_url if p else "",
+            **detail,
+        }
+
+    @route("POST", r"/api/runtime/h3/detect-nodes")
+    def runtime_h3_detect(self, m, body, q):
+        """连本地 ComfyUI 自动识别 H3 节点类名，并持久化写回 Provider 配置。"""
+        from .providers import registry
+        p = registry.get("video", "video-h3") or registry.get("video")
+        if not hasattr(p, "node_map"):
+            return 400, {"error": "当前视频 Provider 不支持节点识别"}
+        nm = p.node_map()
+        meta = dict(getattr(p, "meta", {}) or {})
+        meta["node_map"] = nm
+        # 只有 ComfyUI 真的连得上、H3 节点真的就绪，才把它设为默认视频 Provider；
+        # 否则只记住映射，等环境装好后再自动接管。
+        try:
+            healthy = bool(p.health().get("ok"))
+        except Exception:
+            healthy = False
+        try:
+            registry.upsert_builtin(p.id or "video-h3", {
+                "name": p.name, "type": "video", "base_url": p.base_url,
+                "models": list(p.models or []), "meta": meta, "enabled": healthy,
+            })
+            persisted = True
+        except Exception:
+            persisted = False
+        return 200, {"ok": True, "node_map": nm, "persisted": persisted,
+                     "enabled": healthy,
+                     "message": ("H3 已就绪，已设为默认视频 Provider"
+                                 if healthy else
+                                 "节点映射已保存；ComfyUI/H3 尚未就绪，装好后会自动接管")}
+
+    @route("POST", r"/api/runtime/import/verify")
+    def runtime_import_verify(self, m, body, q):
+        """只读校验：判断某个目录是否是完整可用的离线运行时包。"""
+        from .runtime.installer import installer
+        return 200, installer().verify_offline((body or {}).get("source") or "")
+
+    @route("POST", r"/api/runtime/import")
+    def runtime_import(self, m, body, q):
+        """从离线包（U 盘 / 内网共享）导入运行时，全程不联网。"""
+        from .runtime.installer import installer
+        return 200, installer().import_offline((body or {}).get("source") or "")
+
+    @route("POST", r"/api/runtime/export")
+    def runtime_export(self, m, body, q):
+        """把本机已部署好的运行时导出成可拷贝的离线包。"""
+        from .runtime.installer import installer
+        return 200, installer().export_offline((body or {}).get("dest") or "")
+
+    @route("POST", r"/api/runtime/comfy/start")
+    def runtime_comfy_start(self, m, body, q):
+        """启动本地 ComfyUI（由部署器安装的那份）。"""
+        import subprocess
+        from .core.config import RUNTIME_DIR
+        rt = RUNTIME_DIR
+        main_py = rt / "comfyui" / "main.py"
+        venv_py = rt / "venv" / "Scripts" / "python.exe"
+        if not main_py.exists() or not venv_py.exists():
+            return 400, {"error": "ComfyUI 尚未部署，请先在「环境部署」里一键安装"}
+        try:
+            subprocess.Popen(
+                [str(venv_py), str(main_py), "--listen", "127.0.0.1", "--port", "8188"],
+                cwd=str(rt / "comfyui"),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as e:
+            return 500, {"error": f"启动失败：{e}"}
+        return 200, {"ok": True, "url": "http://127.0.0.1:8188",
+                     "message": "ComfyUI 正在启动，约 20 秒后可用"}
+
+    @route("POST", r"/api/runtime/comfy/stop")
+    def runtime_comfy_stop(self, m, body, q):
+        import subprocess
+        from .core.config import RUNTIME_DIR
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "python.exe", "/FI",
+                            f"WINDOWTITLE eq *{RUNTIME_DIR.name}*"],
+                           capture_output=True, timeout=15)
+        except Exception:
+            pass
+        return 200, {"ok": True, "message": "已发送停止指令"}
 
     # ------------------------------------------------------------ 工作流
     @route("GET", r"/api/projects/(?P<pid>[\w\-]+)/workflow")
@@ -514,6 +659,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class _Server(ThreadingHTTPServer):
+    """静默掉浏览器主动断开连接时抛的 ConnectionResetError/BrokenPipe。
+
+    这些异常本身无害（前端轮询、用户刷新页面都会触发），
+    但 socketserver 默认会打一整片 traceback，把真正的日志淹掉。
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(host: str, port: int) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = _Server((host, port), Handler)
+    # 首次运行自动播种一个示例项目（项目数为 0 时才做，后台跑，不阻塞启动）
+    try:
+        from .services import seed
+        seed.ensure_demo_project()
+    except Exception as e:
+        print(f"  [warn] 示例项目播种失败：{e}")
     return httpd

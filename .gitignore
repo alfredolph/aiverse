@@ -33,6 +33,7 @@ env/
 
 # ---- 用户数据（绝不入库）----
 projects/
+/runtime/
 *.log
 
 # ---- 凭据（绝不入库）----
@@ -49,4 +50,8 @@ Thumbs.db
 desktop.ini
 
 # ---- 构建中间产物 ----
+build/
+build_*/
+dist/
+dist_*/
 installer/Output/

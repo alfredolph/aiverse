@@ -109,3 +109,38 @@ def update(pid: str, **fields) -> None:
 
 def delete(pid: str) -> None:
     db.run("DELETE FROM providers WHERE id=?", (pid,))
+
+
+def upsert_builtin(pid: str, fields: dict) -> dict:
+    """按固定 ID 写入/更新一个「系统托管」Provider（如部署完成后自动注册的 H3）。
+
+    与用户手动新增的 Provider 不同，它带 meta.managed=True，
+    界面会标注为「本地部署」，用户仍可改地址或停用。
+    """
+    name = fields.get("name") or pid
+    kind = fields.get("type") or "video"
+    base_url = fields.get("base_url") or ""
+    api_key = fields.get("api_key") or ""
+    models = fields.get("models") or []
+    meta = dict(fields.get("meta") or {})
+    meta["managed"] = True
+    enabled = 1 if fields.get("enabled", True) else 0
+
+    exist = db.one("SELECT id FROM providers WHERE id=?", (pid,))
+    if exist:
+        db.run(
+            "UPDATE providers SET name=?,type=?,base_url=?,api_key=?,models=?,enabled=?,meta=? WHERE id=?",
+            (name, kind, base_url, api_key, db.dumps(models), enabled, db.dumps(meta), pid),
+        )
+    else:
+        db.run(
+            "INSERT INTO providers(id,name,type,base_url,api_key,models,enabled,meta) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (pid, name, kind, base_url, api_key, db.dumps(models), enabled, db.dumps(meta)),
+        )
+    return {"id": pid, "ok": True}
+
+
+def set_enabled(pid: str, enabled: bool) -> dict:
+    db.run("UPDATE providers SET enabled=? WHERE id=?", (1 if enabled else 0, pid))
+    return {"ok": True}
