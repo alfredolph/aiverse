@@ -37,6 +37,13 @@ jobs:
         continue-on-error: true
         run: python tools/test_downloader.py
 
+      # 部署器本体：真实下载 uv（17 MB）跑完 _run() 全程 ——
+      # 下载 → 解压 → 落地 → exe 真执行 → state.json → 幂等跳过。
+      # 只取计划里最小的那一步，不然要下 30 GB。同样走公网。
+      - name: 部署器本体（_run 端到端，--skip-ffmpeg）
+        continue-on-error: true
+        run: python tools/test_deploy_slice.py --skip-ffmpeg
+
   build:
     needs: verify
     runs-on: windows-latest
