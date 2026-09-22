@@ -73,6 +73,21 @@ def file_mode(path: str) -> str:
     return "100644"
 
 
+def blob_bytes(rev: str, path: str) -> bytes:
+    """取**已提交**的文件内容，而不是工作区内容。
+
+    这点很关键：工作区文件在 Windows 上带 CRLF，而仓库里存的是 LF
+    （见 .gitattributes）。直接读工作区会把 CRLF 推进仓库，
+    一个只改了几行的文件在 GitHub 上会显示成「整个文件都变了」。
+    `git cat-file` 输出的是裸 blob，不经过 smudge 过滤器，正好是我们要的。
+    """
+    p = subprocess.run(["git", "cat-file", "blob", f"{rev}:{path}"],
+                       cwd=str(ROOT), capture_output=True)
+    if p.returncode == 0:
+        return p.stdout
+    return (ROOT / path).read_bytes()
+
+
 def repo_login(tok: str) -> str:
     return api("GET", "/user", tok)["login"]
 
@@ -125,7 +140,7 @@ def main() -> int:
             entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
             print(f"  - 删除 {path}")
             continue
-        raw = (ROOT / path).read_bytes()
+        raw = blob_bytes(local_head, path)
         blob = api("POST", f"/repos/{owner}/{args.repo}/git/blobs", tok, {
             "content": base64.b64encode(raw).decode(),
             "encoding": "base64",
