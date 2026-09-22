@@ -166,6 +166,15 @@ iscc installer\aiverse.iss
 仓库已配置 GitHub Actions（`.github/workflows/build.yml`）：
 推一个 `v*` 标签就会自动在 Windows runner 上打包、跑健康检查、并把 exe 挂到 Release。
 
+流水线分两个 job：
+
+- `verify` —— 语法检查 + H3 生成链路（假 ComfyUI，全本地）+ 下载器完整性
+  + 部署器本体（`--skip-ffmpeg`，只下 17 MB）。后两个走公网镜像，标了
+  `continue-on-error`：红了要去看日志，但不阻断出包
+- `build` —— 打包 exe → 启动做 API/前端冒烟 → 编译安装包 →
+  **安装 / 卸载回归**（静默装 → 校验 `aiverse.ini` → 静默卸 → 确认安装目录无残留）
+  → 上传产物 → 挂 Release
+
 ```bash
 git tag v1.0.1 && git push origin v1.0.1
 ```
@@ -401,9 +410,12 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 - **修**：本机对连不上的本地端口会静默丢包，端口探测每次白等 1~2 秒，
   叠加前端 2 秒轮询后，示例项目要跑 105 秒。现在探测超时压到 0.2 秒 + TTL 缓存，
   **105 秒 → 2 秒**。
-- **加**：`tools/test_h3_mock.py`（假 ComfyUI 端到端跑通生成链路）、
-  `tools/test_downloader.py`（真实下载 + 续传逐字节比对 + 解压 + 执行 + 取消）。
-  两个都进了 CI，以后这类问题不用靠运气发现。
+- **加**：三个端到端测试，都接进了 CI：
+  - `tools/test_h3_mock.py` —— 起一个假 ComfyUI，真跑通「提交 → 轮询 → 取回 MP4」
+  - `tools/test_downloader.py` —— 真实下载 + 断点续传（逐字节比对）+ 解压 + 执行 + 取消
+  - `tools/test_deploy_slice.py` —— 真跑 `Installer._run()` 全程（下载 → 解压 → 落地 →
+    `state.json` → 幂等跳过），实测 uv 与 FFmpeg 两个二进制都能执行
+  以后这类问题不用靠运气发现。
 
 ### v1.0.0 —— 首个可安装版本
 
