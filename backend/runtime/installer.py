@@ -33,6 +33,9 @@ class Installer:
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self._state: dict[str, Any] = self._load()
+        # 可选步骤（KJNodes 之类）失败时记在这里：部署照样算成功，
+        # 但状态里要留着，别让用户以为「全部装好了」
+        self._optional_failed: list[str] = []
 
     # ------------------------------------------------------------ 状态
     def _load(self) -> dict[str, Any]:
@@ -148,6 +151,7 @@ class Installer:
         m = dict(catalog.MIRRORS.get(plan["mirror"], catalog.MIRRORS["cn"]))
         m["_key"] = plan["mirror"] if plan["mirror"] in catalog.MIRRORS else "cn"
         self._log(f"开始部署，目标目录 {rt}，预计下载 {plan['total_download_human']}")
+        self._optional_failed = []
 
         try:
             for s in plan["steps"]:
@@ -164,7 +168,21 @@ class Installer:
                 dl.progress = self._progress_cb(key)
                 t0 = time.time()
 
-                self._execute(s, plan, dl, m, rt)
+                try:
+                    self._execute(s, plan, dl, m, rt)
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    # 可选步骤（KJNodes 加速节点之类）失败不该拖垮整条部署 ——
+                    # 没有它 H3 照样出片。但必须**如实记下来**：状态标 failed、
+                    # 错误写进 message、日志里明确说「跳过继续」，不能吞掉。
+                    if not s.get("optional"):
+                        raise
+                    self._set_step(key, status="failed", percent=100.0,
+                                   message=f"可选步骤失败，已跳过：{e}")
+                    self._log(f"! 可选步骤失败，跳过继续：{s['name']} —— {e}")
+                    self._optional_failed.append(f"{s['name']}：{e}")
+                    continue
 
                 if s.get("marker"):
                     mp = rt / s["marker"]
@@ -179,9 +197,15 @@ class Installer:
             with self._lock:
                 self._state["status"] = "done"
                 self._state["finished_at"] = time.time()
+                if self._optional_failed:
+                    self._state["optional_failed"] = list(self._optional_failed)
             self._save()
             invalidate_cache()
-            self._log("全部部署完成，可以开始本地出片了")
+            if self._optional_failed:
+                self._log("部署完成，但有可选步骤失败（不影响出片）："
+                          + "；".join(self._optional_failed))
+            else:
+                self._log("全部部署完成，可以开始本地出片了")
 
         except Cancelled:
             with self._lock:
@@ -255,11 +279,16 @@ class Installer:
     # ------------------------------------------------------------ 各类型实现
     def _do_download_zip(self, s: dict, m: dict, rt: Path, dl: Downloader) -> None:
         key = s["key"]
-        # 每个组件的落点 + 判断安装成功的标志文件
+        # 每个组件的落点 + 判断安装成功的标志文件。
+        # key 就是 planner 里的步骤 key —— 这里和 catalog.COMPONENT_MIRRORS 必须同名，
+        # 早先这里写的是 kj-nodes 而计划里是 comfy-nodes，导致有 N 卡的机器上
+        # 部署到 KJNodes 这步直接「未配置下载地址」整条失败。
         targets = {
             "uv": (rt / "uv", rt / "uv" / "uv.exe"),
             "ffmpeg": (rt / "ffmpeg", rt / "ffmpeg" / "bin" / "ffmpeg.exe"),
             "comfyui": (rt / "comfyui", rt / "comfyui" / "main.py"),
+            "comfy-nodes": (rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes",
+                            rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes" / "__init__.py"),
             "kj-nodes": (rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes",
                          rt / "comfyui" / "custom_nodes" / "ComfyUI-KJNodes" / "__init__.py"),
         }

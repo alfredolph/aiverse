@@ -224,7 +224,7 @@ function deployBanner() {
       <button class="btn sm primary" data-act="open-runtime">${running ? '查看进度' : '⚡ 一键部署'}</button></div>
     <div class="hint">
       本客户端只负责编排，所以本体很小。真正出片的 <b>MiniMax H3</b> 是 33B 参数模型，
-      精简版权重 <b>39 GB</b> 起，加上 PyTorch/CUDA 约 2.5 GB —— 这部分不可能塞进安装包。
+      精简版权重 <b>39 GB</b> 起，加上 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB —— 这部分不可能塞进安装包。
       点「一键部署」，程序会自动装好全部依赖与权重（含 FFmpeg），之后就能用你的显卡本地出片。
       不方便联网的话，也可以用<b>离线包导入</b>，零下载复制。
     </div>
@@ -269,7 +269,7 @@ function renderRuntime() {
           剧本、角色、分镜、审核、抽卡、剪辑。
           <br/><br/>
           真正出片的算力在 <b>MiniMax H3</b>：33B 参数、精简版 <b>39 GB</b> 权重，
-          再加 PyTorch/CUDA 约 2.5 GB。这些不可能塞进一个 9 MB 的 exe，
+          再加 PyTorch/CUDA 与 ComfyUI 依赖约 2.3 GB。这些不可能塞进一个 9 MB 的 exe，
           全球所有 AI 桌面应用（含 ComfyUI Desktop / Pinokio / EZlaunch）都是首次运行下载。
           <br/><br/>
           所以这里的做法是：<b>装一次，点一下，剩下的全自动</b>。
@@ -364,6 +364,11 @@ function renderRuntime() {
             ${stat(plan.can_local ? '本地出片' : '仅云端', '部署后能力')}
           </div>
           ${plan.warnings.map((w) => `<div class="hint" style="margin-bottom:8px">⚠ ${esc(w)}</div>`).join('')}
+          ${(r.optional_failed || []).length ? `<div class="hint" style="margin-bottom:8px">
+            ⚠ 有可选步骤失败，但**不影响出片**（表格里那几行会标 failed）：
+            ${(r.optional_failed || []).map((w) => esc(w)).join('；')}
+            <br/>可选步骤主要是 KJNodes 这类加速节点。想要的话可以单独重试那一步。
+          </div>` : ''}
           <table><thead><tr><th style="width:26px"></th><th>步骤</th><th style="width:96px">体积</th>
             <th style="width:230px">进度</th><th style="width:74px">状态</th></tr></thead><tbody>
             ${steps.map((s) => {

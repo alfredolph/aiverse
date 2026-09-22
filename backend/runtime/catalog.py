@@ -66,7 +66,11 @@ COMPONENT_MIRRORS: dict[str, dict[str, list[str]]] = {
                _COMFY_GH],
         "global": [_COMFY_GH, f"https://ghproxy.net/{_COMFY_GH}"],
     },
-    "kj-nodes": {
+    # key 必须和 planner 里的**步骤 key** 一致（`comfy-nodes`）。
+    # 这里以前叫 `kj-nodes`，而部署计划里的步骤 key 是 `comfy-nodes` ——
+    # 两边对不上，于是有 N 卡的机器上「一键部署」跑到这一步直接
+    # 「未配置下载地址：comfy-nodes」整条挂掉。别名见 _ALIASES。
+    "comfy-nodes": {
         "cn": [f"https://ghproxy.net/{_KJ_GH}",
                f"https://gh-proxy.com/{_KJ_GH}",
                _KJ_GH],
@@ -74,9 +78,13 @@ COMPONENT_MIRRORS: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# 旧名字 / 别名的容错，免得哪天再有人按另一个名字调用
+_ALIASES = {"kj-nodes": "comfy-nodes", "kj_nodes": "comfy-nodes"}
+
 
 def component_urls(key: str, mirror: str = "cn") -> list[str]:
     """返回某组件的下载候选列表（去重，保持顺序）。"""
+    key = _ALIASES.get(key, key)
     table = COMPONENT_MIRRORS.get(key) or {}
     urls = list(table.get(mirror) or [])
     primary = (MIRRORS.get(mirror) or {}).get(key)

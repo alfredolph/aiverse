@@ -57,7 +57,7 @@ jobs:
       # ComfyUI 以前靠 comfy-cli 装，而它的 install 只认 --skip-manager，
       # --nvidia / --yes / install --workspace 都不存在、node install <url> 也无效。
       # 改成直接下源码 zip 后，落点对不对必须有测试盯着。
-      - name: 部署器：ComfyUI 源码包 + KJNodes 落点（真实下载 61 MB）
+      - name: 部署器：ComfyUI 源码包 + KJNodes 落点（真实下载 102 MB）
         id: t_comfyui
         continue-on-error: true
         run: python tools/test_deploy_slice.py --skip-ffmpeg --with-comfyui

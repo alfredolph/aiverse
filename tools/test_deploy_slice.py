@@ -16,6 +16,11 @@
 都没有，`node install <github-url>` 也无效（要的是 Registry ID）—— 也就是说那一步
 大概率一跑就挂。改成直接下源码 zip 之后，落点对不对必须有个测试盯着。
 
+第 1 步里还有一条**不需要联网**的自检：计划里每个 `download_zip` 步骤都得能查到
+下载地址。它抓的是「planner 的步骤 key 和 catalog / installer 的 key 对不上」——
+2026-09-22 就是它抓到的：计划里叫 `comfy-nodes`，installer 的落点表里叫 `kj-nodes`，
+有 N 卡的机器上部署跑到 KJNodes 那步直接「未配置下载地址」整条失败。
+
 torch / H3 权重那几步要 N 卡加几十 GB，不在本测试范围内。
 
 用法：
@@ -95,13 +100,20 @@ def main() -> int:
     print(f"\nRUNTIME_DIR = {rt}")
     print(f"state 文件   = {rt / 'state.json'}")
 
-    # ------------------------------------------------------ [1/5] 计划过滤
-    print("\n[1/5] 从真实部署计划里挑出 download_zip 步骤")
-    # 注意 include_nodes=True 是**必须显式给**的：没有 N 卡的机器上真实计划里
-    # 本来就不含 comfy-nodes（KJNodes 是加速节点，只对有 GPU 的档位有意义）。
-    # 之前这里只给了 args.with_comfyui，CI（无 N 卡）上计划里就没有 KJNodes，
-    # 于是「KJNodes 落点」那条断言从来没被真正跑到过。
+    # ------------------------------------------------------ [1/5] 计划自检
+    print("\n[1/5] 计划自检 + 挑出要真跑的 download_zip 步骤")
     plan = planner.build_plan(mirror="cn", include_nodes=args.with_comfyui)
+
+    # 先做一遍**不需要联网**的完整性检查：每个下载类步骤都得真的配上下载地址。
+    # 这一条抓的是「planner 里的步骤 key 和 catalog / installer 里的 key 对不上」——
+    # 2026-09-22 就是它：计划里叫 comfy-nodes，installer 的 targets 表里叫 kj-nodes，
+    # 结果有 N 卡的机器上「一键部署」跑到 KJNodes 那步直接
+    # 「未配置下载地址：comfy-nodes」整条挂掉，而当时的测试从没覆盖到这一步。
+    bad = [s["key"] for s in plan["steps"]
+           if s["kind"] == "download_zip" and not catalog.component_urls(s["key"], "cn")]
+    need(not bad, f"这些步骤没配下载地址（key 对不上？）：{bad}",
+         f"{len(plan['steps'])} 个步骤都有对应配置")
+
     want = {"uv"}
     if not args.skip_ffmpeg:
         want.add("ffmpeg")

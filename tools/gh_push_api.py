@@ -36,7 +36,29 @@ def token() -> str:
     return p.stdout.strip()
 
 
+def api_via_gh(method: str, path: str, payload: dict | None = None):
+    """urllib 出不去网时（本机 Python 被限制 egress，但 `gh` 是通的）改走 gh CLI。"""
+    # 注意 --input - 不能省：不给它的话 gh 会发一个**空 body** 的 POST，
+    # 服务端只会回一个语焉不详的 422 Validation Failed。
+    cmd = ["gh", "api", path, "-X", method]
+    if payload is not None:
+        cmd += ["--input", "-"]
+    p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
+                       input=json.dumps(payload).encode() if payload is not None else None)
+    if p.returncode != 0:
+        print(f"  ✗ {method} {path}（gh）\n    {p.stderr.decode(errors='replace')[:500]}")
+        raise SystemExit(1)
+    body = p.stdout.decode(errors="replace").strip()
+    return json.loads(body) if body else {}
+
+
+_NO_URLLIB = False
+
+
 def api(method: str, path: str, tok: str, payload: dict | None = None):
+    global _NO_URLLIB
+    if _NO_URLLIB:
+        return api_via_gh(method, path, payload)
     url = path if path.startswith("http") else API + path
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
@@ -53,6 +75,13 @@ def api(method: str, path: str, tok: str, payload: dict | None = None):
         detail = e.read().decode()[:500]
         print(f"  ✗ {method} {path} -> {e.code}\n    {detail}")
         raise SystemExit(1)
+    except urllib.error.URLError as e:
+        # 本机 Python 的 egress 被挡（WinError 10061）时 urllib 一律连不上，
+        # 但 `gh` 走的是自己的通道，通常能用 —— 这个脚本存在的意义就是绕网络，
+        # 它自己反而被网络挡住就说不过去了。第一次失败后就一直用 gh，别刷屏。
+        _NO_URLLIB = True
+        print(f"  · urllib 连不上（{e.reason}），之后改用 gh api")
+        return api_via_gh(method, path, payload)
 
 
 def git(*args: str) -> str:
