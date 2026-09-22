@@ -91,6 +91,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败" }
           Get-ChildItem installer\Output
 
+      # 这条是补上来的：之前只测了「装得上」，没测「卸得干净」，
+      # 结果卸载后 {app} 里会留一个 80 字节的 aiverse.ini 空目录。
+      - name: 安装 / 卸载回归
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'av_install'
+          $setup = Get-ChildItem installer\Output\AIVerse-Setup-*.exe | Select-Object -First 1
+          Write-Host "安装 $($setup.Name) -> $dir"
+          Start-Process -FilePath $setup.FullName `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dir" -Wait
+
+          $ini = Join-Path $dir 'aiverse.ini'
+          if (-not (Test-Path $ini)) { throw "安装后没生成 aiverse.ini（安装版分流标记缺失）" }
+          $text = Get-Content $ini -Raw
+          if ($text -notmatch 'installed=1') { throw "aiverse.ini 内容不对：$text" }
+          if (-not (Test-Path (Join-Path $dir 'AIVerse.exe'))) { throw "安装后没有 AIVerse.exe" }
+
+          # Inno 的卸载器会把自己复制到 %TEMP% 再干活，原进程很快退出，
+          # 所以 -Wait 靠不住，改成轮询等目录消失。
+          Start-Process -FilePath (Join-Path $dir 'unins000.exe') `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $dir) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 1 }
+
+          if (Test-Path $dir) {
+            $left = (Get-ChildItem $dir -Force | Select-Object -ExpandProperty Name) -join ', '
+            throw "卸载后仍有残留：$left"
+          }
+          Write-Host "✓ 安装 -> 校验 aiverse.ini -> 卸载 -> 安装目录无残留"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

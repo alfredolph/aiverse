@@ -80,6 +80,14 @@ Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Fla
 [UninstallRun]
 ; 不自动删除任何用户数据
 
+; 实测发现：卸载后 {app}\aiverse.ini 会残留（Inno 对 [INI] 的自动清理不可靠），
+; 结果用户卸载完还会看到一个装着 80 字节 ini 的空目录。显式清掉。
+; 注意只清安装目录里的东西 —— %LOCALAPPDATA%\AIVerse 下的项目数据与 30GB 运行时
+; 是刻意保留的，重装后可直接复用。
+[UninstallDelete]
+Type: files; Name: "{app}\aiverse.ini"
+Type: dirifempty; Name: "{app}"
+
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);
 var
