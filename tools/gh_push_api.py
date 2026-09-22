@@ -92,6 +92,48 @@ def repo_login(tok: str) -> str:
     return api("GET", "/user", tok)["login"]
 
 
+def has_object(rev: str) -> bool:
+    p = subprocess.run(["git", "cat-file", "-e", f"{rev}^{{commit}}"],
+                       cwd=str(ROOT), capture_output=True)
+    return p.returncode == 0
+
+
+def _tree_entries(text: str) -> dict[str, tuple[str, str]]:
+    """把 `git ls-tree -r` 的输出解析成 {path: (mode, sha)}。"""
+    out: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        meta, _, path = line.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            out[path] = (parts[0], parts[2])
+    return out
+
+
+def tree_diff(owner: str, repo: str, tok: str, remote_sha: str, local_rev: str) -> list[str]:
+    """远端 HEAD 本地没有时（它可能是上一次 API 推送造出来的），改比对两边的 tree。
+
+    API 推出来的 commit 只存在于 GitHub 上，本地 `git diff` 会因为
+    `bad object` 直接失败。这时候与其让用户手动翻上一个本地提交，
+    不如把远端 tree 递归拉下来跟本地 `ls-tree -r` 逐项对一遍 —— 结果一样准。
+    """
+    r = api("GET", f"/repos/{owner}/{repo}/git/trees/{remote_sha}?recursive=1", tok)
+    remote = {e["path"]: (e["mode"], e["sha"])
+              for e in r.get("tree", []) if e["type"] == "blob"}
+    local = _tree_entries(git("ls-tree", "-r", local_rev))
+
+    lines: list[str] = []
+    for path in sorted(set(remote) | set(local)):
+        if path not in remote:
+            lines.append(f"A\t{path}")
+        elif path not in local:
+            lines.append(f"D\t{path}")
+        elif remote[path][1] != local[path][1]:
+            lines.append(f"M\t{path}")
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="用 Git Data API 推送（绕过 github.com:443 被墙）")
     ap.add_argument("--repo", default="aiverse", help="仓库名")
@@ -117,8 +159,14 @@ def main() -> int:
         print("  · 远端已是最新，无需推送")
         return 0
 
-    base = args.since or remote_head
-    names = git("diff", "--name-status", base, local_head).strip().splitlines()
+    if args.since:
+        names = git("diff", "--name-status", args.since, local_head).strip().splitlines()
+    elif has_object(remote_head):
+        names = git("diff", "--name-status", remote_head, local_head).strip().splitlines()
+    else:
+        print("  · 远端 HEAD 本地没有（上次 API 推送造出来的），改用 tree 逐项比对")
+        names = tree_diff(owner, args.repo, tok, remote_head, local_head)
+
     if not names:
         print("  · 没有差异")
         return 0
