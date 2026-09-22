@@ -69,7 +69,7 @@ ComfyUI Desktop、Pinokio、EZlaunch 等所有同类桌面应用，走的都是�
 
 ### 方式 B：安装包（含开始菜单 / 卸载）
 
-下载 `AIVerse-Setup-1.0.1.exe` 运行安装向导。默认装到
+下载 `AIVerse-Setup-1.0.2.exe` 运行安装向导。默认装到
 `%LOCALAPPDATA%\Programs\AI Studio`，**无需管理员权限**；卸载时不会删除你的项目数据
 **也不会删除已下载的 30 GB 运行时**（重装后可直接复用）。
 
@@ -150,7 +150,7 @@ python build_exe.py
 
 ```bash
 iscc installer\aiverse.iss
-# -> installer/Output/AIVerse-Setup-1.0.1.exe
+# -> installer/Output/AIVerse-Setup-1.0.2.exe
 ```
 
 安装包会额外做两件事：
@@ -169,14 +169,14 @@ iscc installer\aiverse.iss
 流水线分两个 job：
 
 - `verify` —— 语法检查 + H3 生成链路（假 ComfyUI，全本地）+ 下载器完整性
-  + 部署器本体（`--skip-ffmpeg`，只下 17 MB）。后两个走公网镜像，标了
-  `continue-on-error`：红了要去看日志，但不阻断出包
+  + 部署器本体（`--skip-ffmpeg`，只下 17 MB）+ 剪辑导出（真渲染 + ffprobe 校验）。
+  后三个走公网镜像或要装 ffmpeg，标了 `continue-on-error`：红了要去看日志，但不阻断出包
 - `build` —— 打包 exe → 启动做 API/前端冒烟 → 编译安装包 →
   **安装 / 卸载回归**（静默装 → 校验 `aiverse.ini` → 静默卸 → 确认安装目录无残留）
   → 上传产物 → 挂 Release
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.0.2 && git push origin v1.0.2
 ```
 
 ---
@@ -394,6 +394,29 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
 
 ## 九、更新日志
 
+### v1.0.2 —— 修掉「导出根本跑不起来」
+
+这一版只改了两行 ffmpeg 滤镜，但性质严重：**v1.0.0 / v1.0.1 里导出是坏的**。
+
+- **修**：`pad` 滤镜参数写成了 `pad=606x1080:...`，而 ffmpeg 要的是
+  `pad=宽:高:x:y`。它把 `606x1080` 当成宽度表达式，报
+  `Invalid chars 'x1080' at the end of expression`，整条导出直接失败。
+  任何用户点「导出」都只会拿到一句 `导出失败（退出码 …）`。
+  `scale` 用 `宽x高` 是对的，两个滤镜写法不一样，抄错了。
+  顺带加上 `force_divisible_by=2`：按比例缩放出来的中间尺寸可能是奇数，
+  那样 `pad` 的 `(ow-iw)/2` 不是整数会再报一次错，x264 也不接受奇数尺寸。
+- **修**：竖屏分辨率算错。原来按「高 = 预设数字」算，9:16 的 1080p 会得到
+  **606x1080** —— 不是任何标准尺寸，还白白丢掉一半纵向分辨率。
+  改成按「短边 = 预设数字」：1080p 横屏 1920x1080、竖屏 **1080x1920**
+  （抖音/快手标准），720p 竖屏 720x1280，4:5 竖屏 1080x1350。横屏结果不变。
+- **加**：`tools/test_export.py` —— 用 ffmpeg 合成三段测试片段当作「已渲染镜头」，
+  真跑一遍 concat + scale/pad + 烧字幕，再用 ffprobe 校验产物的分辨率、时长、
+  音视频轨、编码。就是它把上面两个问题抓出来的。
+
+> 为什么这么久才发现：导出需要「已渲染镜头」，而没有 N 卡时内置 Provider 只出
+> 占位图，`run_export()` 永远走「只返回计划」那条分支 —— 真正拼视频的代码从没被执行过。
+> 这个测试用合成片段绕开了显卡依赖。
+
 ### v1.0.1 —— 把「一键部署」的地基修牢
 
 只动了一键部署链路，界面和功能没变。但这一版**建议一定要升**：
@@ -416,6 +439,8 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
   - `tools/test_deploy_slice.py` —— 真跑 `Installer._run()` 全程（下载 → 解压 → 落地 →
     `state.json` → 幂等跳过），实测 uv 与 FFmpeg 两个二进制都能执行
   以后这类问题不用靠运气发现。
+
+> 后续（v1.0.2）又补了第四个：`tools/test_export.py`。就是它抓出「导出根本跑不起来」。
 
 ### v1.0.0 —— 首个可安装版本
 

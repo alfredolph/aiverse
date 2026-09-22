@@ -57,15 +57,24 @@ def detect() -> dict[str, Any]:
 
 
 def _aspect_size(aspect: str, resolution: str) -> str:
+    """按「短边 = 预设里那个数字」算输出尺寸。
+
+    1080p 的预设是 1920x1080，短边 1080：
+        横屏 16:9 → 1920x1080（与预设一致）
+        竖屏 9:16 → 1080x1920（抖音/快手竖屏标准）
+    之前竖屏是按「高 = 1080」算的，9:16 会得到 606x1080 —— 既不是任何标准尺寸，
+    又白白丢掉一半纵向分辨率。漫剧默认就是 9:16，所以这个坑会天天踩。
+    """
     base = _PRESET.get(resolution, "1280x720")
     w, h = (int(x) for x in base.split("x"))
     aw, ah = (float(x) for x in aspect.split(":"))
+    short = min(w, h)
     if aw >= ah:
-        nw = w
-        nh = int(w * ah / aw / 2) * 2
+        nh = short
+        nw = int(round(nh * aw / ah / 2)) * 2
     else:
-        nh = h
-        nw = int(h * aw / ah / 2) * 2
+        nw = short
+        nh = int(round(nw * ah / aw / 2)) * 2
     return f"{nw}x{nh}"
 
 
@@ -104,8 +113,15 @@ def build_export_plan(project: dict, shots: list[dict], options: dict) -> dict[s
 
     exe = ffmpeg_path() or Path("ffmpeg")
     cmd = [str(exe), "-y", "-f", "concat", "-safe", "0", "-i", str(base / concat_rel)]
-    vf = (f"scale={size}:force_original_aspect_ratio=decrease,"
-          f"pad={size}:(ow-iw)/2:(oh-ih)/2")
+    # 注意 pad 的参数是 `pad=宽:高:x:y`，**不是** `pad=宽x高:...` ——
+    # 写成 `pad=606x1080:...` 会被当成「宽度 = 表达式 606x1080」，
+    # ffmpeg 直接报 Invalid chars 'x1080' 然后整条导出失败。
+    # scale 用 `宽x高` 才是对的，两个滤镜的写法不一样，很容易抄错。
+    # force_divisible_by=2 是必须的：scale 按比例缩出来的中间尺寸可能是奇数，
+    # 那样 pad 的 (ow-iw)/2 就不是整数，会再报一次错，而且 x264 也不接受奇数尺寸。
+    ow, oh = (int(x) for x in size.split("x"))
+    vf = (f"scale={ow}:{oh}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+          f"pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2")
     if has_srt:
         esc_srt = str(base / srt_rel).replace("\\", "/").replace(":", "\\:")
         vf += f",subtitles='{esc_srt}'"
