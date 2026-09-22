@@ -21,10 +21,13 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backend.app import serve                                    # noqa: E402
-from backend.core.config import (APP_CODE, APP_NAME, BASE_DIR,   # noqa: E402
-                                 DATA_DIR, HOST, PORT, RUNTIME_DIR, VERSION)
+from backend.core.config import (APP_CODE, APP_NAME, DATA_DIR,   # noqa: E402
+                                 HOST, PORT, RUNTIME_DIR, VERSION)
+from backend.core.console import setup_console                   # noqa: E402
 from backend.gpu import detector as gpu                          # noqa: E402
 from backend.media import ffmpeg                                 # noqa: E402
+
+setup_console()
 
 BANNER = r"""
    _   _____   __     __
