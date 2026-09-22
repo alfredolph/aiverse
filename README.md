@@ -556,6 +556,11 @@ Phase 16 Marketplace / 商业化 ⏳（预留）
   本来建议不装 KJNodes，硬装上只是多一个可能失败的步骤。现在跟着推荐档位走。
 - **加**：`tools/test_ffmpeg.py` —— 盯住「找得到 / 认得出 / 不再重复下载」，
   包括 ffprobe 与 ffmpeg 不在同一处的组合。
+- **加**：CI 的 build 冒烟测试会拿 `/api/meta` 直接问那个刚打好的 exe
+  「你有 FFmpeg 吗、是自带的那份吗」。之前只有打包日志能证明（exe 从 10.6 MB
+  变成 72.8 MB），而 `fetch_ffmpeg.py` 抓失败时打包脚本只打一行警告、照样出包 ——
+  那样会发出去一个「说好自带 FFmpeg、其实没有」的 exe：界面一切正常，
+  用户点到导出才发现渲染不了。现在 available 为假直接构建失败。
 
 > 顺带把版本号从测试里抽出来了：`test_api_surface.py` 和 `verify_release_export.py`
 > 原来把 `1.0.5` 写死在断言里，每次发版都得记得改，漏改就是一次假失败，
